@@ -7,6 +7,7 @@ struct VisualizerView: NSViewRepresentable {
         var isPlaying: Bool
         var playbackTime: TimeInterval
         var energy: Float
+        var spectrum: [Float]
         var reduceMotion: Bool
     }
 
@@ -59,6 +60,7 @@ struct VisualizerView: NSViewRepresentable {
                             isPlaying: false,
                             playbackTime: 0,
                             energy: 0.12,
+                            spectrum: [Float](repeating: 0, count: AudioAnalyzer.defaultOutputBinCount),
                             reduceMotion: false
                         )
                     }
@@ -67,6 +69,7 @@ struct VisualizerView: NSViewRepresentable {
                         isPlaying: self.snapshot.isPlaying,
                         playbackTime: self.snapshot.playbackTime,
                         energy: self.snapshot.energy,
+                        spectrum: self.snapshot.spectrum,
                         reduceMotion: self.snapshot.reduceMotion
                     )
                 }

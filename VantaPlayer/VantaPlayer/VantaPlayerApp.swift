@@ -15,30 +15,43 @@ struct VantaPlayerApp: App {
                     playerViewModel.openFilesPanel()
                 }
                 .keyboardShortcut("o", modifiers: .command)
+
+                Button("Import Folder…") {
+                    playerViewModel.openFolderPanel()
+                }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
             }
 
             CommandMenu("Playback") {
                 Button(playerViewModel.isPlaying ? "Pause" : "Play") {
                     playerViewModel.togglePlayPause()
                 }
+                .keyboardShortcut(.space, modifiers: [])
+                .disabled(!playerViewModel.hasTracks)
 
                 Button("Previous Track") {
                     playerViewModel.playPrevious()
                 }
+                .disabled(!playerViewModel.hasTracks)
 
                 Button("Next Track") {
                     playerViewModel.playNext()
                 }
+                .disabled(!playerViewModel.hasTracks)
 
                 Divider()
 
                 Button("Seek Backward 5 Seconds") {
                     playerViewModel.seek(by: -5)
                 }
+                .keyboardShortcut(.leftArrow, modifiers: [])
+                .disabled(!playerViewModel.hasTracks)
 
                 Button("Seek Forward 5 Seconds") {
                     playerViewModel.seek(by: 5)
                 }
+                .keyboardShortcut(.rightArrow, modifiers: [])
+                .disabled(!playerViewModel.hasTracks)
 
                 Divider()
 

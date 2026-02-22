@@ -26,8 +26,11 @@ struct PlayerView: View {
             PlaylistSidebarView(
                 tracks: viewModel.tracks,
                 selection: $viewModel.selectedTrackID,
+                isImporting: viewModel.isImporting,
+                importProgressLabel: viewModel.importProgressLabel,
                 onSelect: viewModel.playTrack(with:),
-                onMove: viewModel.moveTracks(from:to:)
+                onMove: viewModel.moveTracks(from:to:),
+                onRemove: viewModel.removeTrack(id:)
             )
             .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 300)
         } content: {
@@ -42,18 +45,47 @@ struct PlayerView: View {
                 Button {
                     viewModel.openFilesPanel()
                 } label: {
-                    Label("Open", systemImage: "folder.badge.plus")
+                    Label("Open Files", systemImage: "folder.badge.plus")
                 }
+                .help("Open audio files (\u{2318}O)")
                 .accessibilityLabel("Open audio files")
                 .accessibilityHint("Open the import dialog")
+
+                Button {
+                    viewModel.openFolderPanel()
+                } label: {
+                    Label("Import Folder", systemImage: "folder.badge.gearshape")
+                }
+                .help("Import folder (\u{2318}\u{21E7}O)")
+                .accessibilityLabel("Import folder")
+                .accessibilityHint("Scan a folder and add audio files")
             }
 
-            ToolbarItemGroup(placement: .principal) {
+            ToolbarItem(placement: .principal) {
+                VStack(spacing: 2) {
+                    Text(viewModel.currentTrack?.title ?? "VantaPlayer")
+                        .font(.headline)
+                        .lineLimit(1)
+
+                    if let subtitle = viewModel.currentTrack?.subtitle {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: 320)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(viewModel.currentTrack?.title ?? "No track selected")
+            }
+
+            ToolbarItemGroup(placement: .primaryAction) {
                 Button {
                     viewModel.playPrevious()
                 } label: {
                     Image(systemName: "backward.end.fill")
                 }
+                .help("Previous track")
                 .accessibilityLabel("Previous track")
                 .accessibilityHint("Play the previous track in the playlist")
                 .disabled(!viewModel.hasTracks)
@@ -63,6 +95,7 @@ struct PlayerView: View {
                 } label: {
                     Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
                 }
+                .help("Play or pause (Space)")
                 .accessibilityLabel(viewModel.isPlaying ? "Pause" : "Play")
                 .accessibilityHint("Toggle playback")
                 .disabled(!viewModel.hasTracks)
@@ -72,9 +105,17 @@ struct PlayerView: View {
                 } label: {
                     Image(systemName: "forward.end.fill")
                 }
+                .help("Next track")
                 .accessibilityLabel("Next track")
                 .accessibilityHint("Play the next track in the playlist")
                 .disabled(!viewModel.hasTracks)
+
+                if viewModel.isImporting {
+                    ToolbarImportProgressView(
+                        label: viewModel.importProgressLabel ?? "Importing…",
+                        fraction: viewModel.importProgressFraction
+                    )
+                }
             }
         }
         .background(
@@ -102,14 +143,7 @@ struct PlayerView: View {
 
     private var contentColumn: some View {
         ZStack(alignment: .bottom) {
-            VisualizerView(
-                snapshot: .init(
-                    isPlaying: viewModel.isPlaying,
-                    playbackTime: viewModel.playbackTime,
-                    energy: viewModel.visualizerEnergy(reduceMotion: reduceMotion),
-                    reduceMotion: reduceMotion
-                )
-            )
+            VisualizerView(snapshot: viewModel.visualizerSnapshot(reduceMotion: reduceMotion))
             .overlay(alignment: .topLeading) {
                 if let inlineError = viewModel.inlineError {
                     InlineErrorBanner(
@@ -125,15 +159,13 @@ struct PlayerView: View {
                     .padding(16)
                 }
             }
-            .overlay(alignment: .topTrailing) {
-                if viewModel.isImporting {
-                    LoadingChip()
-                        .padding(16)
-                }
-            }
             .overlay {
                 if viewModel.tracks.isEmpty {
-                    EmptyStateView(isDropTargeted: dropTargetActive, reduceMotion: reduceMotion)
+                    EmptyStateView(
+                        isDropTargeted: dropTargetActive,
+                        reduceMotion: reduceMotion,
+                        isRestoringSession: viewModel.isRestoringSession
+                    )
                 }
             }
             .accessibilityLabel("Visualizer")
@@ -160,6 +192,7 @@ struct PlayerView: View {
                 Image(systemName: "backward.fill")
             }
             .buttonStyle(.borderless)
+            .help("Previous track")
             .accessibilityLabel("Previous track")
             .accessibilityHint("Play previous track")
             .disabled(!viewModel.hasTracks)
@@ -171,6 +204,7 @@ struct PlayerView: View {
                     .font(.system(size: 22, weight: .semibold))
             }
             .buttonStyle(.plain)
+            .help("Play or pause")
             .accessibilityLabel(viewModel.isPlaying ? "Pause" : "Play")
             .accessibilityHint("Toggle playback")
             .disabled(!viewModel.hasTracks)
@@ -181,6 +215,7 @@ struct PlayerView: View {
                 Image(systemName: "forward.fill")
             }
             .buttonStyle(.borderless)
+            .help("Next track")
             .accessibilityLabel("Next track")
             .accessibilityHint("Play next track")
             .disabled(!viewModel.hasTracks)
@@ -200,6 +235,7 @@ struct PlayerView: View {
                     }
                 }
             )
+            .help("Seek")
             .accessibilityLabel("Playback position")
             .accessibilityHint("Adjust the current playhead position")
             .disabled(!viewModel.hasTracks)
@@ -214,6 +250,7 @@ struct PlayerView: View {
 
             Slider(value: volumeBinding, in: 0...1)
                 .frame(width: 110)
+                .help("Volume")
                 .accessibilityLabel("Volume")
                 .accessibilityHint("Adjust playback volume")
         }
@@ -234,9 +271,31 @@ struct PlayerView: View {
                 .font(.headline)
 
             if let currentTrack = viewModel.currentTrack {
+                if let artworkData = currentTrack.artworkData,
+                   let artwork = NSImage(data: artworkData) {
+                    Image(nsImage: artwork)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 84, height: 84)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .accessibilityHidden(true)
+                }
+
                 Text(currentTrack.title)
                     .font(.body.weight(.semibold))
                     .lineLimit(2)
+
+                if let artist = currentTrack.artist, !artist.isEmpty {
+                    Label(artist, systemImage: "person")
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                if let album = currentTrack.album, !album.isEmpty {
+                    Label(album, systemImage: "rectangle.stack")
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
 
                 if let duration = currentTrack.duration, duration > 0 {
                     Label(timeString(duration), systemImage: "clock")
@@ -280,6 +339,7 @@ struct PlayerView: View {
 private struct EmptyStateView: View {
     let isDropTargeted: Bool
     let reduceMotion: Bool
+    let isRestoringSession: Bool
 
     var body: some View {
         VStack(spacing: 14) {
@@ -290,9 +350,24 @@ private struct EmptyStateView: View {
             Text("Drop audio here or press ⌘O")
                 .font(.title3.weight(.medium))
 
-            Text("Supports wav, mp3, m4a, aiff, and flac (if available).")
+            Text("Use ⌘⇧O to import a full folder.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+
+            Text("Supports wav, mp3, m4a, aiff, and flac.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            if isRestoringSession {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Restoring previous session…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.top, 6)
+            }
         }
         .padding(32)
         .frame(maxWidth: 460)
@@ -347,18 +422,29 @@ private struct InlineErrorBanner: View {
     }
 }
 
-private struct LoadingChip: View {
+private struct ToolbarImportProgressView: View {
+    let label: String
+    let fraction: Double?
+
     var body: some View {
-        HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.small)
-            Text("Importing…")
-                .font(.caption)
+        HStack(spacing: 6) {
+            if let fraction {
+                ProgressView(value: fraction)
+                    .frame(width: 56)
+                    .controlSize(.small)
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+            }
+
+            Text(label)
+                .font(.caption2)
                 .foregroundStyle(.secondary)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.thinMaterial, in: Capsule())
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .accessibilityLabel(label)
     }
 }
 

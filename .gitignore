@@ -15,6 +15,8 @@ DerivedData/
 
 # Local derived data (we'll use this)
 .derivedData/
+.swift-module-cache/
+.clang-module-cache/
 
 # Logs
 *.log

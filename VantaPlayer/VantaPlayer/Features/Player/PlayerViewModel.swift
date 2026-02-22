@@ -1,9 +1,12 @@
 import AppKit
 import AVFoundation
 import Combine
-import QuartzCore
 import SwiftUI
 import UniformTypeIdentifiers
+
+#if canImport(MediaPlayer)
+import MediaPlayer
+#endif
 
 @MainActor
 final class PlayerViewModel: ObservableObject {
@@ -13,14 +16,47 @@ final class PlayerViewModel: ObservableObject {
         let trackID: Track.ID?
     }
 
+    struct ImportProgress: Sendable {
+        let completed: Int
+        let total: Int
+        let label: String
+
+        var fraction: Double? {
+            total > 0 ? min(max(Double(completed) / Double(total), 0), 1) : nil
+        }
+    }
+
     @Published private(set) var tracks: [Track] = []
     @Published var selectedTrackID: Track.ID?
     @Published private(set) var isImporting = false
+    @Published private(set) var importProgress: ImportProgress?
+    @Published private(set) var isRestoringSession = false
     @Published private(set) var inlineError: InlineError?
-    @Published private(set) var audioPlayer: AudioPlayer?
     @Published private(set) var hasBootstrapped = false
 
     private var preferredVolume: Float = 0.8
+    private var playbackPositions: [Track.ID: TimeInterval] = [:]
+
+    private let bookmarksStore = BookmarksStore()
+    private lazy var sessionStore = SessionStore(bookmarksStore: bookmarksStore)
+
+    private var audioPlayer: AudioEnginePlayer?
+    private var audioAnalyzer: AudioAnalyzer?
+
+    private var playerCancellables: Set<AnyCancellable> = []
+    private var importTask: Task<Void, Never>?
+    private var persistenceTask: Task<Void, Never>?
+
+    private var shouldAutoplayOnImport = false
+    private var didAutoplayDuringImport = false
+    private var activeImportGeneration = 0
+    private var lastPersistedSecond = -1
+
+    #if canImport(MediaPlayer)
+    private var remoteCommandsConfigured = false
+    private var remoteCommandTargets: [Any] = []
+    private var lastNowPlayingUpdate = Date.distantPast
+    #endif
 
     private static let allowedExtensions: Set<String> = ["wav", "mp3", "m4a", "aiff", "aif", "flac"]
 
@@ -59,21 +95,31 @@ final class PlayerViewModel: ObservableObject {
         !tracks.isEmpty
     }
 
+    var importProgressLabel: String? {
+        importProgress?.label
+    }
+
+    var importProgressFraction: Double? {
+        importProgress?.fraction
+    }
+
     func bootstrapAfterFirstFrame() {
         guard !hasBootstrapped else { return }
         hasBootstrapped = true
 
         Task { @MainActor in
             await Task.yield()
-            _ = ensureAudioPlayer()
+            _ = ensureAudioStack()
+            configureRemoteCommandsIfNeeded()
+            await restoreSession()
         }
     }
 
     func openFilesPanel() {
         let panel = NSOpenPanel()
-        panel.title = "Import Audio"
-        panel.prompt = "Add"
-        panel.message = "Choose audio files to add to your playlist."
+        panel.title = "Import Audio Files"
+        panel.prompt = "Import"
+        panel.message = "Choose one or more audio files."
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
@@ -83,63 +129,147 @@ final class PlayerViewModel: ObservableObject {
         importTracks(from: panel.urls)
     }
 
+    func openFolderPanel() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Folder"
+        panel.prompt = "Import"
+        panel.message = "Choose a folder to scan for audio files."
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+
+        guard panel.runModal() == .OK, let folderURL = panel.url else { return }
+        importFolder(from: folderURL)
+    }
+
     func importTracks(from urls: [URL]) {
-        let accepted = filteredImportURLs(from: urls)
-        guard !accepted.isEmpty else {
-            presentError("No supported audio files were dropped.", trackID: nil)
+        let acceptedURLs = filteredImportURLs(from: urls)
+        guard !acceptedURLs.isEmpty else {
+            presentError("No supported audio files were imported.", trackID: nil)
             return
         }
 
-        isImporting = true
-        inlineError = nil
+        let generation = beginImport(label: "Importing 0/\(acceptedURLs.count)", total: acceptedURLs.count)
 
-        Task { [accepted] in
-            let imported = await Task.detached(priority: .userInitiated) {
-                await Self.makeTracks(from: accepted)
-            }.value
+        importTask = Task { [acceptedURLs, generation] in
+            var importedCount = 0
+            var firstImportedTrackID: Track.ID?
 
-            self.isImporting = false
-            self.applyImportedTracks(imported)
+            for (index, url) in acceptedURLs.enumerated() {
+                if Task.isCancelled { break }
+                guard generation == activeImportGeneration else { return }
+
+                let track = await Task.detached(priority: .userInitiated) {
+                    await TrackImportWorker.makeTrack(from: url)
+                }.value
+
+                if appendImportedTrack(track) {
+                    importedCount += 1
+                    if firstImportedTrackID == nil {
+                        firstImportedTrackID = track.id
+                    }
+                }
+
+                importProgress = ImportProgress(
+                    completed: index + 1,
+                    total: acceptedURLs.count,
+                    label: "Importing \(index + 1)/\(acceptedURLs.count)"
+                )
+            }
+
+            finishImport(
+                discoveredCount: acceptedURLs.count,
+                importedCount: importedCount,
+                firstTrackID: firstImportedTrackID,
+                generation: generation
+            )
+        }
+    }
+
+    func importFolder(from folderURL: URL) {
+        let normalizedFolder = normalizedURL(folderURL)
+        let didStartScope = bookmarksStore.beginAccess(to: normalizedFolder)
+        let existingURLs = Set(tracks.map { normalizedURL($0.url) })
+        let stream = TrackImportWorker.folderAudioFilesStream(
+            rootURL: normalizedFolder,
+            allowedExtensions: Self.allowedExtensions,
+            excluding: existingURLs
+        )
+
+        let generation = beginImport(label: "Scanning folder…", total: 0)
+
+        importTask = Task { [generation] in
+            defer {
+                if didStartScope {
+                    bookmarksStore.endAccess(to: normalizedFolder)
+                }
+            }
+
+            var discoveredCount = 0
+            var importedCount = 0
+            var firstImportedTrackID: Track.ID?
+
+            for await url in stream {
+                if Task.isCancelled { break }
+                guard generation == activeImportGeneration else { return }
+
+                discoveredCount += 1
+                importProgress = ImportProgress(
+                    completed: importedCount,
+                    total: discoveredCount,
+                    label: "Importing \(importedCount)/\(discoveredCount)"
+                )
+
+                let track = await Task.detached(priority: .userInitiated) {
+                    await TrackImportWorker.makeTrack(from: url)
+                }.value
+
+                if appendImportedTrack(track) {
+                    importedCount += 1
+                    if firstImportedTrackID == nil {
+                        firstImportedTrackID = track.id
+                    }
+                }
+
+                importProgress = ImportProgress(
+                    completed: importedCount,
+                    total: discoveredCount,
+                    label: "Importing \(importedCount)/\(discoveredCount)"
+                )
+            }
+
+            finishImport(
+                discoveredCount: discoveredCount,
+                importedCount: importedCount,
+                firstTrackID: firstImportedTrackID,
+                generation: generation
+            )
         }
     }
 
     func moveTracks(from source: IndexSet, to destination: Int) {
         tracks.move(fromOffsets: source, toOffset: destination)
+        scheduleSessionSave()
     }
 
     func playTrack(with id: Track.ID) {
-        guard let index = tracks.firstIndex(where: { $0.id == id }) else { return }
-
-        selectedTrackID = id
-        inlineError = nil
-
-        guard tracks[index].isPlayable else {
-            presentError("“\(tracks[index].title)” can’t be played.", trackID: id)
-            return
-        }
-
-        let player = ensureAudioPlayer()
-        do {
-            try player.loadTrack(at: tracks[index].url, autoplay: true)
-            if tracks[index].duration == nil && player.duration > 0 {
-                tracks[index].duration = player.duration
-            }
-        } catch {
-            tracks[index].isPlayable = false
-            presentError("Couldn’t play “\(tracks[index].title)”.", trackID: id)
-        }
+        playTrack(with: id, autoplay: true, explicitStartTime: nil)
     }
 
     func togglePlayPause() {
         if isPlaying {
             audioPlayer?.pause()
+            refreshNowPlayingInfo(force: true)
+            scheduleSessionSave()
             return
         }
 
         guard let targetTrack = selectedTrackForPlayback() else { return }
 
-        if audioPlayer?.currentURL == targetTrack.url {
-            ensureAudioPlayer().play()
+        if audioPlayer?.currentTrackID == targetTrack.id {
+            ensureAudioStack().play()
+            refreshNowPlayingInfo(force: true)
+            scheduleSessionSave()
         } else {
             playTrack(with: targetTrack.id)
         }
@@ -157,15 +287,20 @@ final class PlayerViewModel: ObservableObject {
 
     func seek(by delta: TimeInterval) {
         audioPlayer?.seek(by: delta)
+        scheduleSessionSave()
+        refreshNowPlayingInfo(force: true)
     }
 
     func seek(to time: TimeInterval) {
         audioPlayer?.seek(to: time)
+        scheduleSessionSave()
+        refreshNowPlayingInfo(force: true)
     }
 
     func setVolume(_ value: Float) {
         preferredVolume = max(0, min(value, 1))
-        ensureAudioPlayer().setVolume(preferredVolume)
+        audioPlayer?.setVolume(preferredVolume)
+        scheduleSessionSave()
     }
 
     func adjustVolume(by delta: Float) {
@@ -175,15 +310,20 @@ final class PlayerViewModel: ObservableObject {
     func removeTrack(id: Track.ID) {
         guard let removingIndex = tracks.firstIndex(where: { $0.id == id }) else { return }
 
+        let removedTrack = tracks[removingIndex]
         let removingSelectedTrack = selectedTrackID == id
-        let removingCurrentAudio = audioPlayer?.currentURL == tracks[removingIndex].url
+        let removingCurrentAudio = audioPlayer?.currentTrackID == id
 
         tracks.remove(at: removingIndex)
+        playbackPositions.removeValue(forKey: id)
+        bookmarksStore.endAccess(to: removedTrack.url)
 
         if tracks.isEmpty {
             selectedTrackID = nil
             audioPlayer?.unload()
             inlineError = nil
+            scheduleSessionSave()
+            refreshNowPlayingInfo(force: true)
             return
         }
 
@@ -192,34 +332,42 @@ final class PlayerViewModel: ObservableObject {
             selectedTrackID = tracks[nextIndex].id
         }
 
-        if removingCurrentAudio, let selectedTrackID {
-            playTrack(with: selectedTrackID)
+        if removingCurrentAudio {
+            if let selectedTrackID {
+                playTrack(with: selectedTrackID)
+            } else {
+                audioPlayer?.unload()
+            }
         }
 
         if inlineError?.trackID == id {
             inlineError = nil
         }
+
+        scheduleSessionSave()
+        refreshNowPlayingInfo(force: true)
     }
 
     func dismissInlineError() {
         inlineError = nil
     }
 
-    func visualizerEnergy(reduceMotion: Bool) -> Float {
-        let timestamp = CACurrentMediaTime()
-        let idleSpeed = reduceMotion ? 0.18 : 0.42
-        let idleWave = 0.22 + (0.07 * sin(timestamp * idleSpeed))
+    func visualizerSnapshot(reduceMotion: Bool) -> VisualizerView.PlaybackSnapshot {
+        let frame = audioAnalyzer?.latestFrame() ?? AudioAnalyzer.AnalysisFrame(
+            spectrum: [Float](repeating: 0, count: AudioAnalyzer.defaultOutputBinCount),
+            energy: 0
+        )
 
-        guard let audioPlayer else {
-            return Float(max(0.05, min(idleWave, 1)))
-        }
+        let idleEnergy: Float = reduceMotion ? 0.035 : 0.06
+        let resolvedEnergy = isPlaying ? frame.energy : max(frame.energy, idleEnergy)
 
-        let playbackPulse = audioPlayer.isPlaying
-            ? 0.18 * sin(audioPlayer.currentTime * 3.8) + 0.06 * cos(audioPlayer.currentTime * 2.1)
-            : 0
-
-        let combined = idleWave + playbackPulse
-        return Float(max(0.05, min(combined, 1)))
+        return VisualizerView.PlaybackSnapshot(
+            isPlaying: isPlaying,
+            playbackTime: playbackTime,
+            energy: resolvedEnergy,
+            spectrum: frame.spectrum,
+            reduceMotion: reduceMotion
+        )
     }
 
     func handleKeyDown(_ event: NSEvent) -> NSEvent? {
@@ -250,12 +398,19 @@ final class PlayerViewModel: ObservableObject {
         }
     }
 
-    private func ensureAudioPlayer() -> AudioPlayer {
+    private func ensureAudioStack() -> AudioEnginePlayer {
         if let audioPlayer {
             return audioPlayer
         }
 
-        let player = AudioPlayer()
+        let analyzer = AudioAnalyzer(
+            fftSize: AudioAnalyzer.defaultFFTSize,
+            hopSize: AudioAnalyzer.defaultHopSize,
+            outputBinCount: AudioAnalyzer.defaultOutputBinCount,
+            targetFPS: 60
+        )
+
+        let player = AudioEnginePlayer(analyzer: analyzer)
         player.setVolume(preferredVolume)
         player.onPlaybackEnded = { [weak self] in
             Task { @MainActor in
@@ -263,61 +418,180 @@ final class PlayerViewModel: ObservableObject {
             }
         }
 
+        player.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &playerCancellables)
+
+        player.$currentTime
+            .receive(on: RunLoop.main)
+            .sink { [weak self, weak player] currentTime in
+                guard let self else { return }
+                if let trackID = player?.currentTrackID {
+                    playbackPositions[trackID] = currentTime
+                }
+                maybePersistPlaybackPosition(currentTime: currentTime)
+                refreshNowPlayingInfo()
+            }
+            .store(in: &playerCancellables)
+
+        player.$isPlaying
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.refreshNowPlayingInfo(force: true)
+            }
+            .store(in: &playerCancellables)
+
+        player.$currentTrackID
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.refreshNowPlayingInfo(force: true)
+            }
+            .store(in: &playerCancellables)
+
+        audioAnalyzer = analyzer
         audioPlayer = player
+
         return player
     }
 
-    private func filteredImportURLs(from urls: [URL]) -> [URL] {
-        var uniqueURLs = Set<URL>()
-        let existingURLs = Set(tracks.map { $0.url.standardizedFileURL.resolvingSymlinksInPath() })
+    private func playTrack(with id: Track.ID, autoplay: Bool, explicitStartTime: TimeInterval?) {
+        guard let index = tracks.firstIndex(where: { $0.id == id }) else { return }
 
-        var accepted: [URL] = []
-        accepted.reserveCapacity(urls.count)
+        selectedTrackID = id
+        inlineError = nil
 
-        for candidate in urls {
-            let normalizedURL = candidate.standardizedFileURL.resolvingSymlinksInPath()
-            let fileExtension = normalizedURL.pathExtension.lowercased()
-
-            guard normalizedURL.isFileURL,
-                  !normalizedURL.hasDirectoryPath,
-                  Self.allowedExtensions.contains(fileExtension),
-                  !existingURLs.contains(normalizedURL),
-                  !uniqueURLs.contains(normalizedURL) else {
-                continue
-            }
-
-            uniqueURLs.insert(normalizedURL)
-            accepted.append(normalizedURL)
-        }
-
-        return accepted
-    }
-
-    private func applyImportedTracks(_ imported: [Track]) {
-        guard !imported.isEmpty else {
-            presentError("No supported audio files were imported.", trackID: nil)
+        guard tracks[index].isPlayable else {
+            presentError("“\(tracks[index].title)” can’t be played.", trackID: id)
             return
         }
 
-        let shouldAutoPlay = tracks.isEmpty && !isPlaying
+        let player = ensureAudioStack()
+        let startTime = explicitStartTime ?? playbackPositions[id] ?? 0
 
-        tracks.append(contentsOf: imported)
+        do {
+            try player.loadTrack(tracks[index], autoplay: autoplay, startTime: startTime)
+            playbackPositions[id] = player.currentTime
 
-        if selectedTrackID == nil {
-            selectedTrackID = tracks.first?.id
+            if tracks[index].duration == nil && player.duration > 0 {
+                tracks[index].duration = player.duration
+            }
+            tracks[index].unplayableReason = nil
+
+            scheduleSessionSave()
+            refreshNowPlayingInfo(force: true)
+        } catch {
+            tracks[index].isPlayable = false
+            tracks[index].unplayableReason = "Failed to decode audio"
+            presentError("Couldn’t decode “\(tracks[index].title)”.", trackID: id)
+            scheduleSessionSave()
+            refreshNowPlayingInfo(force: true)
+        }
+    }
+
+    @discardableResult
+    private func beginImport(label: String, total: Int) -> Int {
+        importTask?.cancel()
+        activeImportGeneration &+= 1
+        let generation = activeImportGeneration
+        isImporting = true
+        importProgress = ImportProgress(completed: 0, total: total, label: label)
+        inlineError = nil
+        shouldAutoplayOnImport = tracks.isEmpty && !isPlaying
+        didAutoplayDuringImport = false
+        return generation
+    }
+
+    private func finishImport(discoveredCount: Int, importedCount: Int, firstTrackID: Track.ID?, generation: Int) {
+        guard generation == activeImportGeneration else { return }
+        isImporting = false
+        importProgress = nil
+
+        if discoveredCount == 0 {
+            presentError("No supported audio files were found.", trackID: nil)
+            return
         }
 
-        if shouldAutoPlay {
-            if let firstPlayableTrack = imported.first(where: { $0.isPlayable }) {
-                playTrack(with: firstPlayableTrack.id)
+        if importedCount == 0 {
+            presentError("No new files were imported.", trackID: nil)
+            return
+        }
+
+        if shouldAutoplayOnImport && !didAutoplayDuringImport {
+            if let firstTrackID {
+                playTrack(with: firstTrackID)
             } else {
-                presentError("Imported files were added, but none were playable.", trackID: imported.first?.id)
+                presentError("Imported files were added, but none were playable.", trackID: nil)
             }
+        }
+
+        shouldAutoplayOnImport = false
+        didAutoplayDuringImport = false
+        scheduleSessionSave()
+    }
+
+    @discardableResult
+    private func appendImportedTrack(_ incomingTrack: Track) -> Bool {
+        let normalized = normalizedURL(incomingTrack.url)
+        guard !tracks.contains(where: { normalizedURL($0.url) == normalized }) else {
+            return false
+        }
+
+        var track = incomingTrack
+        if track.bookmarkData == nil {
+            track.bookmarkData = try? bookmarksStore.makeBookmark(for: track.url)
+        }
+        _ = bookmarksStore.beginAccess(to: track.url)
+
+        tracks.append(track)
+        if selectedTrackID == nil {
+            selectedTrackID = track.id
+        }
+
+        if shouldAutoplayOnImport && !didAutoplayDuringImport && track.isPlayable {
+            didAutoplayDuringImport = true
+            playTrack(with: track.id)
+        }
+
+        return true
+    }
+
+    private func restoreSession() async {
+        isRestoringSession = true
+
+        let restoredSession = await Task.detached(priority: .utility) { [sessionStore] in
+            sessionStore.restore()
+        }.value
+
+        isRestoringSession = false
+        guard let restoredSession else { return }
+
+        tracks = restoredSession.tracks
+        for track in tracks {
+            _ = bookmarksStore.beginAccess(to: track.url)
+        }
+
+        playbackPositions = restoredSession.playbackPositions
+        preferredVolume = max(0, min(restoredSession.volume, 1))
+        selectedTrackID = restoredSession.selectedTrackID ?? tracks.first?.id
+
+        let player = ensureAudioStack()
+        player.setVolume(preferredVolume)
+
+        let anchorTrackID = restoredSession.playingTrackID ?? selectedTrackID
+        if let anchorTrackID,
+           let anchorTrack = tracks.first(where: { $0.id == anchorTrackID }) {
+            let startTime = playbackPositions[anchorTrackID] ?? 0
+            playTrack(with: anchorTrack.id, autoplay: restoredSession.wasPlaying, explicitStartTime: startTime)
+        } else {
+            refreshNowPlayingInfo(force: true)
         }
     }
 
     private func selectedTrackForPlayback() -> Track? {
-        if let selectedTrackID, let selectedTrack = tracks.first(where: { $0.id == selectedTrackID }) {
+        if let selectedTrackID,
+           let selectedTrack = tracks.first(where: { $0.id == selectedTrackID }) {
             return selectedTrack
         }
 
@@ -351,8 +625,8 @@ final class PlayerViewModel: ObservableObject {
             return selectedIndex
         }
 
-        if let currentURL = audioPlayer?.currentURL,
-           let currentIndex = tracks.firstIndex(where: { $0.url == currentURL }) {
+        if let currentTrackID = audioPlayer?.currentTrackID,
+           let currentIndex = tracks.firstIndex(where: { $0.id == currentTrackID }) {
             return currentIndex
         }
 
@@ -373,41 +647,308 @@ final class PlayerViewModel: ObservableObject {
         return firstResponder is NSTextField
     }
 
-    private static func makeTracks(from urls: [URL]) async -> [Track] {
-        await withTaskGroup(of: (Int, Track?).self) { group in
-            for (index, url) in urls.enumerated() {
-                group.addTask {
-                    let track = await makeTrack(from: url)
-                    return (index, track)
-                }
+    private func filteredImportURLs(from urls: [URL]) -> [URL] {
+        var uniqueURLs = Set<URL>()
+        let existingURLs = Set(tracks.map { normalizedURL($0.url) })
+
+        var accepted: [URL] = []
+        accepted.reserveCapacity(urls.count)
+
+        for candidate in urls {
+            let normalized = normalizedURL(candidate)
+            let fileExtension = normalized.pathExtension.lowercased()
+
+            guard normalized.isFileURL,
+                  !normalized.hasDirectoryPath,
+                  Self.allowedExtensions.contains(fileExtension),
+                  !existingURLs.contains(normalized),
+                  !uniqueURLs.contains(normalized) else {
+                continue
             }
 
-            var ordered = Array<Track?>(repeating: nil, count: urls.count)
-            for await (index, track) in group {
-                ordered[index] = track
-            }
+            uniqueURLs.insert(normalized)
+            accepted.append(normalized)
+        }
 
-            return ordered.compactMap { $0 }
+        return accepted
+    }
+
+    private func normalizedURL(_ url: URL) -> URL {
+        url.standardizedFileURL.resolvingSymlinksInPath()
+    }
+
+    private func maybePersistPlaybackPosition(currentTime: TimeInterval) {
+        let roundedSecond = Int(currentTime)
+        guard roundedSecond != lastPersistedSecond else { return }
+        lastPersistedSecond = roundedSecond
+        scheduleSessionSave()
+    }
+
+    private func scheduleSessionSave() {
+        persistenceTask?.cancel()
+        let snapshot = makeSessionSnapshot()
+
+        persistenceTask = Task.detached(priority: .utility) { [sessionStore] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            sessionStore.save(snapshot: snapshot)
         }
     }
 
-    private static func makeTrack(from url: URL) async -> Track? {
-        let title = url.deletingPathExtension().lastPathComponent
-        let asset = AVURLAsset(url: url)
+    private func makeSessionSnapshot() -> SessionStore.Snapshot {
+        var positions = playbackPositions
+        if let currentTrackID = audioPlayer?.currentTrackID {
+            positions[currentTrackID] = audioPlayer?.currentTime ?? positions[currentTrackID] ?? 0
+        }
+
+        return SessionStore.Snapshot(
+            tracks: tracks,
+            selectedTrackID: selectedTrackID,
+            playingTrackID: audioPlayer?.currentTrackID ?? selectedTrackID,
+            playbackPositions: positions,
+            volume: volume,
+            wasPlaying: isPlaying
+        )
+    }
+
+    private func configureRemoteCommandsIfNeeded() {
+        #if canImport(MediaPlayer)
+        guard !remoteCommandsConfigured else { return }
+        remoteCommandsConfigured = true
+
+        let commandCenter = MPRemoteCommandCenter.shared()
+
+        commandCenter.playCommand.isEnabled = true
+        commandCenter.pauseCommand.isEnabled = true
+        commandCenter.togglePlayPauseCommand.isEnabled = true
+        commandCenter.nextTrackCommand.isEnabled = true
+        commandCenter.previousTrackCommand.isEnabled = true
+
+        remoteCommandTargets.append(commandCenter.playCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            if !self.isPlaying {
+                self.togglePlayPause()
+            }
+            return .success
+        })
+
+        remoteCommandTargets.append(commandCenter.pauseCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            if self.isPlaying {
+                self.togglePlayPause()
+            }
+            return .success
+        })
+
+        remoteCommandTargets.append(commandCenter.togglePlayPauseCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            self.togglePlayPause()
+            return .success
+        })
+
+        remoteCommandTargets.append(commandCenter.nextTrackCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            self.playNext()
+            return .success
+        })
+
+        remoteCommandTargets.append(commandCenter.previousTrackCommand.addTarget { [weak self] _ in
+            guard let self else { return .commandFailed }
+            self.playPrevious()
+            return .success
+        })
+        #endif
+    }
+
+    private func refreshNowPlayingInfo(force: Bool = false) {
+        #if canImport(MediaPlayer)
+        let now = Date()
+        if !force, now.timeIntervalSince(lastNowPlayingUpdate) < 0.2 {
+            return
+        }
+        lastNowPlayingUpdate = now
+
+        guard let currentTrack else {
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            return
+        }
+
+        var info: [String: Any] = [
+            MPMediaItemPropertyTitle: currentTrack.title,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: playbackTime,
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? 1.0 : 0.0
+        ]
+
+        if let artist = currentTrack.artist, !artist.isEmpty {
+            info[MPMediaItemPropertyArtist] = artist
+        }
+
+        if let album = currentTrack.album, !album.isEmpty {
+            info[MPMediaItemPropertyAlbumTitle] = album
+        }
+
+        let resolvedDuration = playbackDuration
+        if resolvedDuration > 0 {
+            info[MPMediaItemPropertyPlaybackDuration] = resolvedDuration
+        }
+
+        if let artworkData = currentTrack.artworkData,
+           let artworkImage = NSImage(data: artworkData) {
+            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(
+                boundsSize: artworkImage.size
+            ) { _ in
+                artworkImage
+            }
+        }
+
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+
+        if #available(macOS 10.13, *) {
+            MPNowPlayingInfoCenter.default().playbackState = isPlaying ? .playing : .paused
+        }
+        #endif
+    }
+}
+
+private enum TrackImportWorker {
+    static func makeTrack(from url: URL) async -> Track {
+        let normalized = normalizedURL(url)
+        let fallbackTitle = normalized.deletingPathExtension().lastPathComponent
+        let asset = AVURLAsset(url: normalized)
 
         do {
             async let durationTask = asset.load(.duration)
             async let playableTask = asset.load(.isPlayable)
+            async let metadataTask = asset.load(.commonMetadata)
 
             let duration = try await durationTask
             let isPlayable = try await playableTask
+            let metadata = try await metadataTask
 
             let seconds = duration.seconds
             let resolvedDuration = seconds.isFinite && seconds > 0 ? seconds : nil
 
-            return Track(url: url, title: title, duration: resolvedDuration, isPlayable: isPlayable)
+            async let titleTask = metadataString(for: .commonKeyTitle, in: metadata)
+            async let artistTask = metadataString(for: .commonKeyArtist, in: metadata)
+            async let albumTask = metadataString(for: .commonKeyAlbumName, in: metadata)
+            async let artworkTask = metadataArtworkData(in: metadata)
+
+            let title = await titleTask ?? fallbackTitle
+            let artist = await artistTask
+            let album = await albumTask
+            let artworkData = await artworkTask
+
+            return Track(
+                url: normalized,
+                title: title,
+                artist: artist,
+                album: album,
+                duration: resolvedDuration,
+                artworkData: artworkData,
+                bookmarkData: nil,
+                isPlayable: isPlayable,
+                unplayableReason: isPlayable ? nil : "Unsupported codec or format"
+            )
         } catch {
-            return Track(url: url, title: title, duration: nil, isPlayable: false)
+            return Track(
+                url: normalized,
+                title: fallbackTitle,
+                artist: nil,
+                album: nil,
+                duration: nil,
+                artworkData: nil,
+                bookmarkData: nil,
+                isPlayable: false,
+                unplayableReason: "Metadata read failed"
+            )
         }
+    }
+
+    static func folderAudioFilesStream(
+        rootURL: URL,
+        allowedExtensions: Set<String>,
+        excluding existing: Set<URL>
+    ) -> AsyncStream<URL> {
+        let normalizedRoot = normalizedURL(rootURL)
+        let normalizedExisting = Set(existing.map(normalizedURL))
+
+        return AsyncStream { continuation in
+            let scanner = Task.detached(priority: .utility) {
+                let fileManager = FileManager.default
+                let options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles, .skipsPackageDescendants]
+                let keys: [URLResourceKey] = [.isRegularFileKey]
+
+                guard let enumerator = fileManager.enumerator(
+                    at: normalizedRoot,
+                    includingPropertiesForKeys: keys,
+                    options: options
+                ) else {
+                    continuation.finish()
+                    return
+                }
+
+                var visited = Set<URL>()
+
+                while let candidateURL = enumerator.nextObject() as? URL {
+                    if Task.isCancelled { break }
+
+                    let normalizedCandidate = normalizedURL(candidateURL)
+                    let extensionLowercased = normalizedCandidate.pathExtension.lowercased()
+                    guard allowedExtensions.contains(extensionLowercased) else { continue }
+
+                    guard !normalizedExisting.contains(normalizedCandidate),
+                          !visited.contains(normalizedCandidate) else {
+                        continue
+                    }
+
+                    guard (try? normalizedCandidate.resourceValues(forKeys: Set(keys)).isRegularFile) == true else {
+                        continue
+                    }
+
+                    visited.insert(normalizedCandidate)
+                    continuation.yield(normalizedCandidate)
+                }
+
+                continuation.finish()
+            }
+
+            continuation.onTermination = { _ in
+                scanner.cancel()
+            }
+        }
+    }
+
+    private static func metadataString(for key: AVMetadataKey, in metadata: [AVMetadataItem]) async -> String? {
+        guard let item = metadata.first(where: { $0.commonKey == key }),
+              let loadedValue = try? await item.load(.stringValue) else {
+            return nil
+        }
+
+        let value = loadedValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+
+    private static func metadataArtworkData(in metadata: [AVMetadataItem]) async -> Data? {
+        guard let item = metadata.first(where: { $0.commonKey == .commonKeyArtwork }) else {
+            return nil
+        }
+
+        if let dataValue = try? await item.load(.dataValue),
+           !dataValue.isEmpty {
+            return dataValue
+        }
+
+        if let value = try? await item.load(.value),
+           let dictionaryValue = value as? [AnyHashable: Any],
+           let dataValue = dictionaryValue["data"] as? Data,
+           !dataValue.isEmpty {
+            return dataValue
+        }
+
+        return nil
+    }
+
+    private static func normalizedURL(_ url: URL) -> URL {
+        url.standardizedFileURL.resolvingSymlinksInPath()
     }
 }
