@@ -83,8 +83,11 @@ struct PlayerView: View {
                     .transition(sectionTransition)
                 }
 
-                middleSection
-                    .accessibilitySortPriority(3)
+                if isPlaylistVisible {
+                    middleSection
+                        .transition(sectionTransition)
+                        .accessibilitySortPriority(3)
+                }
 
                 if isInspectorVisible {
                     InlineInspectorView(
@@ -102,6 +105,12 @@ struct PlayerView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .dropDestination(for: URL.self) { droppedURLs, _ in
+            viewModel.importTracks(from: droppedURLs)
+            return !droppedURLs.isEmpty
+        } isTargeted: { targeted in
+            dropTargetActive = targeted
+        }
         .animation(sectionAnimation, value: isPlaylistVisible)
         .animation(sectionAnimation, value: isInspectorVisible)
         .animation(sectionAnimation, value: viewModel.inlineError != nil)
@@ -194,22 +203,8 @@ struct PlayerView: View {
     }
 
     private var middleSection: some View {
-        Group {
-            if isPlaylistVisible {
-                playlistSection
-                    .transition(sectionTransition)
-            } else {
-                hiddenPlaylistSection
-                    .transition(sectionTransition)
-            }
-        }
+        playlistSection
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .dropDestination(for: URL.self) { droppedURLs, _ in
-            viewModel.importTracks(from: droppedURLs)
-            return !droppedURLs.isEmpty
-        } isTargeted: { targeted in
-            dropTargetActive = targeted
-        }
     }
 
     private var playlistSection: some View {
@@ -263,32 +258,6 @@ struct PlayerView: View {
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Playlist")
-    }
-
-    private var hiddenPlaylistSection: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "music.note.list")
-                .font(.title3)
-                .foregroundStyle(.secondary)
-
-            Text("Playlist hidden")
-                .font(.subheadline.weight(.medium))
-
-            Text("Use ⌥⌘S to show it")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(.thinMaterial)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
-        )
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Playlist hidden")
     }
 
     private var transportStrip: some View {
