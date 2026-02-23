@@ -3,26 +3,17 @@ import SwiftUI
 @main
 struct VantaPlayerApp: App {
     @StateObject private var playerViewModel = PlayerViewModel()
-    @AppStorage("ui.playlist.visible") private var isPlaylistVisible = true
-    @AppStorage("ui.inspector.visible") private var isInspectorVisible = true
 
     var body: some Scene {
         WindowGroup {
-            PlayerView(
-                viewModel: playerViewModel,
-                isPlaylistVisible: $isPlaylistVisible,
-                isInspectorVisible: $isInspectorVisible
-            )
+            PlayerView(viewModel: playerViewModel)
             .frame(minWidth: 520, minHeight: 420)
             .installWindowChrome()
         }
         .defaultSize(width: 700, height: 760)
         .windowToolbarStyle(.unifiedCompact)
         .commands {
-            ViewCommands(
-                isPlaylistVisible: $isPlaylistVisible,
-                isInspectorVisible: $isInspectorVisible
-            )
+            ViewCommands()
 
             CommandGroup(after: .newItem) {
                 Button("Open Audio Files…") {

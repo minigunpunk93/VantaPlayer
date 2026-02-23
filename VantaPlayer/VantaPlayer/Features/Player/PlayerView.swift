@@ -6,8 +6,9 @@ struct PlayerView: View {
     @Environment(\.chromeInsets) private var chromeInsets
 
     @ObservedObject var viewModel: PlayerViewModel
-    @Binding var isPlaylistVisible: Bool
-    @Binding var isInspectorVisible: Bool
+    @AppStorage(AppStorageKeys.isCompactMode) private var isCompactMode = false
+    @AppStorage(AppStorageKeys.isPlaylistVisible) private var isPlaylistVisible = true
+    @AppStorage(AppStorageKeys.isInspectorVisible) private var isInspectorVisible = true
 
     @State private var dropTargetActive = false
     @State private var scrubPosition: Double = 0
@@ -127,9 +128,18 @@ struct PlayerView: View {
 
             ToolbarItemGroup(placement: .automatic) {
                 Button {
+                    toggleCompactMode()
+                } label: {
+                    Image(systemName: isCompactMode ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                }
+                .help("Toggle compact mode (⌃⌘C)")
+                .accessibilityLabel("Toggle compact mode")
+                .accessibilityHint("Switch between compact and normal window modes")
+
+                Button {
                     togglePlaylistVisibility()
                 } label: {
-                    Image(systemName: isPlaylistVisible ? "sidebar.leading" : "sidebar.left")
+                    Image(systemName: isPlaylistVisible ? "list.bullet.rectangle.fill" : "list.bullet.rectangle")
                 }
                 .help("Toggle playlist (⌥⌘S)")
                 .accessibilityLabel("Toggle playlist")
@@ -138,7 +148,7 @@ struct PlayerView: View {
                 Button {
                     toggleInspectorVisibility()
                 } label: {
-                    Image(systemName: isInspectorVisible ? "sidebar.right" : "info.circle")
+                    Image(systemName: isInspectorVisible ? "info.circle.fill" : "info.circle")
                 }
                 .help("Toggle inspector (⌥⌘I)")
                 .accessibilityLabel("Toggle inspector")
@@ -170,6 +180,16 @@ struct PlayerView: View {
         .onChange(of: viewModel.selectedTrackID) { _, newValue in
             guard let newValue else { return }
             viewModel.playTrack(with: newValue)
+        }
+    }
+
+    private func toggleCompactMode() {
+        if reduceMotion {
+            isCompactMode.toggle()
+        } else {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                isCompactMode.toggle()
+            }
         }
     }
 
