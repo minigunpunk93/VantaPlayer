@@ -7,6 +7,8 @@ struct QueuePickerView: View {
     let onSelectTrack: (Track.ID) -> Void
 
     var body: some View {
+        let density = densityMode.metrics
+
         Menu {
             if tracks.isEmpty {
                 Text("No tracks in queue")
@@ -36,17 +38,17 @@ struct QueuePickerView: View {
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, densityMode.queueHorizontalPadding)
-            .padding(.vertical, densityMode.queueVerticalPadding)
+            .padding(.horizontal, density.queueHorizontalPadding)
+            .padding(.vertical, density.queueVerticalPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: densityMode.cardCornerRadius, style: .continuous))
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: densityMode.cardCornerRadius, style: .continuous)
+                RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous)
                     .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
-        .controlSize(densityMode.controlSize)
+        .controlSize(density.queueControlSize)
         .disabled(tracks.isEmpty)
         .help("Queue picker")
         .accessibilityLabel("Queue")

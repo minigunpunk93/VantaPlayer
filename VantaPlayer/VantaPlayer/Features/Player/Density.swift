@@ -15,158 +15,92 @@ enum DensityMode: String, CaseIterable, Identifiable {
         }
     }
 
-    var controlSize: ControlSize {
+    var metrics: DensityMetrics {
         switch self {
         case .compact:
-            return .small
+            return DensityMetrics(
+                controlSize: .small,
+                queueControlSize: .small,
+                contentPadding: 10,
+                sectionSpacing: 8,
+                cardCornerRadius: 12,
+                headerInnerSpacing: 10,
+                headerSubtitleSpacing: 2,
+                headerHorizontalPadding: 10,
+                headerVerticalPadding: 8,
+                inspectorSpacing: 8,
+                inspectorRowSpacing: 2,
+                inspectorPadding: 10,
+                playlistRowSpacing: 10,
+                playlistRowVerticalPadding: 1,
+                playlistRowHeight: 38,
+                transportSpacing: 8,
+                transportHorizontalPadding: 10,
+                transportVerticalPadding: 8,
+                transportTimeWidth: 42,
+                volumeSliderWidth: 96,
+                queueHorizontalPadding: 10,
+                queueVerticalPadding: 7,
+                compactPlaylistMaxHeight: 210
+            )
         case .comfortable:
-            return .regular
+            return DensityMetrics(
+                controlSize: .regular,
+                queueControlSize: .small,
+                contentPadding: 14,
+                sectionSpacing: 12,
+                cardCornerRadius: 12,
+                headerInnerSpacing: 12,
+                headerSubtitleSpacing: 3,
+                headerHorizontalPadding: 12,
+                headerVerticalPadding: 10,
+                inspectorSpacing: 10,
+                inspectorRowSpacing: 2,
+                inspectorPadding: 12,
+                playlistRowSpacing: 12,
+                playlistRowVerticalPadding: 3,
+                playlistRowHeight: 44,
+                transportSpacing: 10,
+                transportHorizontalPadding: 12,
+                transportVerticalPadding: 10,
+                transportTimeWidth: 46,
+                volumeSliderWidth: 108,
+                queueHorizontalPadding: 12,
+                queueVerticalPadding: 9,
+                compactPlaylistMaxHeight: 240
+            )
         }
     }
+}
 
-    var contentPadding: CGFloat {
-        switch self {
-        case .compact:
-            return 10
-        case .comfortable:
-            return 14
-        }
-    }
+struct DensityMetrics {
+    let controlSize: ControlSize
+    let queueControlSize: ControlSize
+    let contentPadding: CGFloat
+    let sectionSpacing: CGFloat
+    let cardCornerRadius: CGFloat
 
-    var sectionSpacing: CGFloat {
-        switch self {
-        case .compact:
-            return 8
-        case .comfortable:
-            return 12
-        }
-    }
+    let headerInnerSpacing: CGFloat
+    let headerSubtitleSpacing: CGFloat
+    let headerHorizontalPadding: CGFloat
+    let headerVerticalPadding: CGFloat
 
-    var cardCornerRadius: CGFloat { 12 }
+    let inspectorSpacing: CGFloat
+    let inspectorRowSpacing: CGFloat
+    let inspectorPadding: CGFloat
 
-    var headerSpacing: CGFloat {
-        switch self {
-        case .compact:
-            return 10
-        case .comfortable:
-            return 12
-        }
-    }
+    let playlistRowSpacing: CGFloat
+    let playlistRowVerticalPadding: CGFloat
+    let playlistRowHeight: CGFloat
 
-    var headerHorizontalPadding: CGFloat {
-        switch self {
-        case .compact:
-            return 10
-        case .comfortable:
-            return 12
-        }
-    }
+    let transportSpacing: CGFloat
+    let transportHorizontalPadding: CGFloat
+    let transportVerticalPadding: CGFloat
+    let transportTimeWidth: CGFloat
+    let volumeSliderWidth: CGFloat
 
-    var headerVerticalPadding: CGFloat {
-        switch self {
-        case .compact:
-            return 8
-        case .comfortable:
-            return 10
-        }
-    }
+    let queueHorizontalPadding: CGFloat
+    let queueVerticalPadding: CGFloat
 
-    var playlistRowSpacing: CGFloat {
-        switch self {
-        case .compact:
-            return 10
-        case .comfortable:
-            return 12
-        }
-    }
-
-    var playlistRowVerticalPadding: CGFloat {
-        switch self {
-        case .compact:
-            return 1
-        case .comfortable:
-            return 3
-        }
-    }
-
-    var playlistRowHeight: CGFloat {
-        switch self {
-        case .compact:
-            return 32
-        case .comfortable:
-            return 40
-        }
-    }
-
-    var transportSpacing: CGFloat {
-        switch self {
-        case .compact:
-            return 8
-        case .comfortable:
-            return 10
-        }
-    }
-
-    var transportHorizontalPadding: CGFloat {
-        switch self {
-        case .compact:
-            return 10
-        case .comfortable:
-            return 12
-        }
-    }
-
-    var transportVerticalPadding: CGFloat {
-        switch self {
-        case .compact:
-            return 8
-        case .comfortable:
-            return 10
-        }
-    }
-
-    var transportTimeWidth: CGFloat {
-        switch self {
-        case .compact:
-            return 42
-        case .comfortable:
-            return 46
-        }
-    }
-
-    var volumeSliderWidth: CGFloat {
-        switch self {
-        case .compact:
-            return 96
-        case .comfortable:
-            return 108
-        }
-    }
-
-    var queueHorizontalPadding: CGFloat {
-        switch self {
-        case .compact:
-            return 10
-        case .comfortable:
-            return 12
-        }
-    }
-
-    var queueVerticalPadding: CGFloat {
-        switch self {
-        case .compact:
-            return 7
-        case .comfortable:
-            return 9
-        }
-    }
-
-    var compactPlaylistMaxHeight: CGFloat {
-        switch self {
-        case .compact:
-            return 210
-        case .comfortable:
-            return 240
-        }
-    }
+    let compactPlaylistMaxHeight: CGFloat
 }

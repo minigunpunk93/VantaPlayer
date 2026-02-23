@@ -3,10 +3,13 @@ import SwiftUI
 struct InlineInspectorView: View {
     let currentTrack: Track?
     let trackCount: Int
+    let densityMode: DensityMode
     let revealInFinder: (URL) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let density = densityMode.metrics
+
+        VStack(alignment: .leading, spacing: density.inspectorSpacing) {
             HStack {
                 Text("Inspector")
                     .font(.subheadline.weight(.semibold))
@@ -14,14 +17,15 @@ struct InlineInspectorView: View {
             }
 
             if let currentTrack {
-                InspectorRow(label: "Filename", value: currentTrack.url.lastPathComponent)
+                InspectorRow(label: "Filename", value: currentTrack.url.lastPathComponent, densityMode: densityMode)
 
                 InspectorRow(
                     label: "Duration",
-                    value: durationText(currentTrack.duration)
+                    value: durationText(currentTrack.duration),
+                    densityMode: densityMode
                 )
 
-                InspectorRow(label: "File URL", value: currentTrack.url.path)
+                InspectorRow(label: "File URL", value: currentTrack.url.path, densityMode: densityMode)
 
                 Button("Reveal in Finder") {
                     revealInFinder(currentTrack.url)
@@ -36,14 +40,15 @@ struct InlineInspectorView: View {
 
             Divider()
 
-            InspectorRow(label: "Track Count", value: "\(trackCount)")
+            InspectorRow(label: "Track Count", value: "\(trackCount)", densityMode: densityMode)
         }
-        .padding(12)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(density.inspectorPadding)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
         )
+        .controlSize(density.controlSize)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Inspector")
     }
@@ -64,9 +69,10 @@ struct InlineInspectorView: View {
 private struct InspectorRow: View {
     let label: String
     let value: String
+    let densityMode: DensityMode
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: densityMode.metrics.inspectorRowSpacing) {
             Text(label)
                 .font(.caption2)
                 .foregroundStyle(.secondary)

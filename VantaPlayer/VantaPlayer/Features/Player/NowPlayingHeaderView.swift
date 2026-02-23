@@ -5,6 +5,7 @@ struct NowPlayingHeaderView: View {
     let isPlaying: Bool
     let playbackDuration: TimeInterval
     let isImporting: Bool
+    let densityMode: DensityMode
 
     private static let minuteFormatter: DateComponentsFormatter = {
         let formatter = DateComponentsFormatter()
@@ -23,8 +24,10 @@ struct NowPlayingHeaderView: View {
     }()
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
+        let density = densityMode.metrics
+
+        HStack(alignment: .center, spacing: density.headerInnerSpacing) {
+            VStack(alignment: .leading, spacing: density.headerSubtitleSpacing) {
                 Text(primaryTitle)
                     .font(.headline)
                     .lineLimit(1)
@@ -46,11 +49,11 @@ struct NowPlayingHeaderView: View {
                 .padding(.vertical, 5)
                 .background(.thinMaterial, in: Capsule())
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(.horizontal, density.headerHorizontalPadding)
+        .padding(.vertical, density.headerVerticalPadding)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
         )
         .accessibilityElement(children: .combine)

@@ -6,13 +6,21 @@ struct PlayerView: View {
     @Environment(\.chromeInsets) private var chromeInsets
 
     @ObservedObject var viewModel: PlayerViewModel
+
     @AppStorage(AppStorageKeys.isCompactMode) private var isCompactMode = false
     @AppStorage(AppStorageKeys.isPlaylistVisible) private var isPlaylistVisible = true
     @AppStorage(AppStorageKeys.isInspectorVisible) private var isInspectorVisible = true
+    @AppStorage(AppStorageKeys.densityMode) private var densityModeRawValue = DensityMode.comfortable.rawValue
 
     @State private var dropTargetActive = false
     @State private var scrubPosition: Double = 0
     @State private var isScrubbing = false
+    @State private var sectionVisibilityBeforeCompact: SectionVisibilitySnapshot?
+
+    private struct SectionVisibilitySnapshot {
+        let playlistVisible: Bool
+        let inspectorVisible: Bool
+    }
 
     private static let minuteFormatter: DateComponentsFormatter = {
         let formatter = DateComponentsFormatter()
@@ -29,6 +37,14 @@ struct PlayerView: View {
         formatter.zeroFormattingBehavior = [.pad]
         return formatter
     }()
+
+    private var densityMode: DensityMode {
+        DensityMode(rawValue: densityModeRawValue) ?? .comfortable
+    }
+
+    private var density: DensityMetrics {
+        densityMode.metrics
+    }
 
     private var seekRange: ClosedRange<Double> {
         let duration = max(viewModel.playbackDuration, 1)
@@ -60,50 +76,34 @@ struct PlayerView: View {
             .allowsHitTesting(false)
             .accessibilityHidden(true)
 
-            VStack(spacing: 12) {
-                NowPlayingHeaderView(
-                    currentTrack: viewModel.currentTrack,
-                    isPlaying: viewModel.isPlaying,
-                    playbackDuration: viewModel.playbackDuration,
-                    isImporting: viewModel.isImporting
+            if isCompactMode {
+                CompactPlayerLayoutView(
+                    density: density,
+                    sectionTransition: sectionTransition,
+                    showPlaylist: isPlaylistVisible,
+                    showInspector: isInspectorVisible,
+                    headerView: AnyView(nowPlayingHeader),
+                    queuePickerView: AnyView(queuePicker),
+                    inlineErrorView: inlineErrorBannerView,
+                    playlistView: AnyView(compactPlaylistSection),
+                    inspectorView: AnyView(inspectorSection),
+                    transportView: AnyView(transportStrip)
                 )
-                .accessibilitySortPriority(4)
-
-                if let inlineError = viewModel.inlineError {
-                    InlineErrorBanner(
-                        message: inlineError.message,
-                        showRemoveAction: inlineError.trackID != nil,
-                        onRemove: {
-                            if let trackID = inlineError.trackID {
-                                viewModel.removeTrack(id: trackID)
-                            }
-                        },
-                        onDismiss: viewModel.dismissInlineError
-                    )
-                    .transition(sectionTransition)
-                }
-
-                if isPlaylistVisible {
-                    middleSection
-                        .transition(sectionTransition)
-                        .accessibilitySortPriority(3)
-                }
-
-                if isInspectorVisible {
-                    InlineInspectorView(
-                        currentTrack: viewModel.currentTrack,
-                        trackCount: viewModel.tracks.count,
-                        revealInFinder: revealInFinder
-                    )
-                    .transition(sectionTransition)
-                    .accessibilitySortPriority(2)
-                }
-
-                transportStrip
-                    .accessibilitySortPriority(1)
+            } else {
+                NormalPlayerLayoutView(
+                    density: density,
+                    sectionTransition: sectionTransition,
+                    showPlaylist: isPlaylistVisible,
+                    showInspector: isInspectorVisible,
+                    headerView: AnyView(nowPlayingHeader),
+                    inlineErrorView: inlineErrorBannerView,
+                    playlistView: AnyView(normalPlaylistSection),
+                    inspectorView: AnyView(inspectorSection),
+                    transportView: AnyView(transportStrip)
+                )
             }
         }
-        .padding(14)
+        .padding(density.contentPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .dropDestination(for: URL.self) { droppedURLs, _ in
             viewModel.importTracks(from: droppedURLs)
@@ -114,6 +114,7 @@ struct PlayerView: View {
         .animation(sectionAnimation, value: isPlaylistVisible)
         .animation(sectionAnimation, value: isInspectorVisible)
         .animation(sectionAnimation, value: viewModel.inlineError != nil)
+        .animation(sectionAnimation, value: isCompactMode)
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
                 Button {
@@ -143,7 +144,7 @@ struct PlayerView: View {
                 }
                 .help("Toggle compact mode (⌃⌘C)")
                 .accessibilityLabel("Toggle compact mode")
-                .accessibilityHint("Switch between compact and normal window modes")
+                .accessibilityHint("Switch between compact and normal layouts")
 
                 Button {
                     togglePlaylistVisibility()
@@ -176,6 +177,10 @@ struct PlayerView: View {
         }
         .onAppear {
             scrubPosition = viewModel.playbackTime
+            applyCompactModeDefaultsOnAppearIfNeeded()
+        }
+        .onChange(of: isCompactMode) { oldValue, newValue in
+            handleCompactModeChange(from: oldValue, to: newValue)
         }
         .onChange(of: viewModel.playbackTime) { _, newValue in
             guard !isScrubbing else { return }
@@ -192,22 +197,59 @@ struct PlayerView: View {
         }
     }
 
-    private func toggleCompactMode() {
-        if reduceMotion {
-            isCompactMode.toggle()
-        } else {
-            withAnimation(.easeInOut(duration: 0.18)) {
-                isCompactMode.toggle()
-            }
+    private var nowPlayingHeader: some View {
+        NowPlayingHeaderView(
+            currentTrack: viewModel.currentTrack,
+            isPlaying: viewModel.isPlaying,
+            playbackDuration: viewModel.playbackDuration,
+            isImporting: viewModel.isImporting,
+            densityMode: densityMode
+        )
+    }
+
+    private var inlineErrorBannerView: AnyView? {
+        guard let inlineError = viewModel.inlineError else {
+            return nil
+        }
+
+        return AnyView(
+            InlineErrorBanner(
+                message: inlineError.message,
+                showRemoveAction: inlineError.trackID != nil,
+                onRemove: {
+                    if let trackID = inlineError.trackID {
+                        viewModel.removeTrack(id: trackID)
+                    }
+                },
+                onDismiss: viewModel.dismissInlineError
+            )
+        )
+    }
+
+    private var queuePicker: some View {
+        QueuePickerView(
+            tracks: viewModel.tracks,
+            selectedTrackID: viewModel.selectedTrackID,
+            densityMode: densityMode
+        ) { trackID in
+            viewModel.playTrack(with: trackID)
         }
     }
 
-    private var middleSection: some View {
-        playlistSection
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    private var normalPlaylistSection: some View {
+        playlistCard
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .accessibilitySortPriority(3)
     }
 
-    private var playlistSection: some View {
+    private var compactPlaylistSection: some View {
+        playlistCard
+            .frame(maxWidth: .infinity)
+            .frame(maxHeight: density.compactPlaylistMaxHeight)
+            .accessibilitySortPriority(2)
+    }
+
+    private var playlistCard: some View {
         VStack(spacing: 0) {
             if viewModel.isImporting {
                 ImportProgressStrip(
@@ -229,7 +271,8 @@ struct PlayerView: View {
                         PlaylistRowView(
                             title: track.title,
                             duration: track.duration.map(timeString),
-                            isPlayable: track.isPlayable
+                            isPlayable: track.isPlayable,
+                            density: density
                         )
                         .tag(track.id)
                         .contentShape(Rectangle())
@@ -248,20 +291,30 @@ struct PlayerView: View {
             }
         }
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous)
                 .fill(.regularMaterial)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous)
                 .strokeBorder(dropTargetActive ? Color.accentColor.opacity(0.7) : Color.white.opacity(0.08), lineWidth: 1)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Playlist")
     }
 
+    private var inspectorSection: some View {
+        InlineInspectorView(
+            currentTrack: viewModel.currentTrack,
+            trackCount: viewModel.tracks.count,
+            densityMode: densityMode,
+            revealInFinder: revealInFinder
+        )
+        .accessibilitySortPriority(2)
+    }
+
     private var transportStrip: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: density.transportSpacing) {
             Button {
                 viewModel.playPrevious()
             } label: {
@@ -276,7 +329,7 @@ struct PlayerView: View {
                 viewModel.togglePlayPause()
             } label: {
                 Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(.body.weight(.semibold))
                     .frame(width: 16)
             }
             .buttonStyle(.plain)
@@ -297,7 +350,7 @@ struct PlayerView: View {
             Text(timeString(scrubPosition))
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
-                .frame(width: 46, alignment: .trailing)
+                .frame(width: density.transportTimeWidth, alignment: .trailing)
 
             Slider(
                 value: $scrubPosition,
@@ -316,24 +369,73 @@ struct PlayerView: View {
             Text(timeString(viewModel.playbackDuration))
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
-                .frame(width: 46, alignment: .leading)
+                .frame(width: density.transportTimeWidth, alignment: .leading)
 
             Image(systemName: "speaker.fill")
                 .foregroundStyle(.secondary)
 
             Slider(value: volumeBinding, in: 0...1)
-                .frame(width: 108)
+                .frame(width: density.volumeSliderWidth)
                 .help("Volume")
                 .accessibilityLabel("Volume")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .controlSize(density.controlSize)
+        .padding(.horizontal, density.transportHorizontalPadding)
+        .padding(.vertical, density.transportVerticalPadding)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
         )
         .accessibilityElement(children: .contain)
+    }
+
+    private func applyCompactModeDefaultsOnAppearIfNeeded() {
+        guard isCompactMode else { return }
+
+        sectionVisibilityBeforeCompact = SectionVisibilitySnapshot(
+            playlistVisible: isPlaylistVisible,
+            inspectorVisible: isInspectorVisible
+        )
+        isPlaylistVisible = false
+        isInspectorVisible = false
+    }
+
+    private func handleCompactModeChange(from oldValue: Bool, to newValue: Bool) {
+        guard oldValue != newValue else { return }
+
+        let updates = {
+            if newValue {
+                sectionVisibilityBeforeCompact = SectionVisibilitySnapshot(
+                    playlistVisible: isPlaylistVisible,
+                    inspectorVisible: isInspectorVisible
+                )
+                isPlaylistVisible = false
+                isInspectorVisible = false
+            } else if let snapshot = sectionVisibilityBeforeCompact {
+                isPlaylistVisible = snapshot.playlistVisible
+                isInspectorVisible = snapshot.inspectorVisible
+                sectionVisibilityBeforeCompact = nil
+            }
+        }
+
+        if reduceMotion {
+            updates()
+        } else {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                updates()
+            }
+        }
+    }
+
+    private func toggleCompactMode() {
+        if reduceMotion {
+            isCompactMode.toggle()
+        } else {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                isCompactMode.toggle()
+            }
+        }
     }
 
     private func togglePlaylistVisibility() {
@@ -371,18 +473,101 @@ struct PlayerView: View {
     }
 }
 
+private struct NormalPlayerLayoutView: View {
+    let density: DensityMetrics
+    let sectionTransition: AnyTransition
+    let showPlaylist: Bool
+    let showInspector: Bool
+    let headerView: AnyView
+    let inlineErrorView: AnyView?
+    let playlistView: AnyView
+    let inspectorView: AnyView
+    let transportView: AnyView
+
+    var body: some View {
+        VStack(spacing: density.sectionSpacing) {
+            headerView
+                .accessibilitySortPriority(4)
+
+            if let inlineErrorView {
+                inlineErrorView
+                    .transition(sectionTransition)
+            }
+
+            if showPlaylist {
+                playlistView
+                    .transition(sectionTransition)
+                    .accessibilitySortPriority(3)
+            }
+
+            if showInspector {
+                inspectorView
+                    .transition(sectionTransition)
+                    .accessibilitySortPriority(2)
+            }
+
+            transportView
+                .accessibilitySortPriority(1)
+        }
+    }
+}
+
+private struct CompactPlayerLayoutView: View {
+    let density: DensityMetrics
+    let sectionTransition: AnyTransition
+    let showPlaylist: Bool
+    let showInspector: Bool
+    let headerView: AnyView
+    let queuePickerView: AnyView
+    let inlineErrorView: AnyView?
+    let playlistView: AnyView
+    let inspectorView: AnyView
+    let transportView: AnyView
+
+    var body: some View {
+        VStack(spacing: density.sectionSpacing) {
+            headerView
+                .accessibilitySortPriority(6)
+
+            queuePickerView
+                .accessibilitySortPriority(5)
+
+            if let inlineErrorView {
+                inlineErrorView
+                    .transition(sectionTransition)
+            }
+
+            transportView
+                .accessibilitySortPriority(4)
+
+            if showPlaylist {
+                playlistView
+                    .transition(sectionTransition)
+                    .accessibilitySortPriority(3)
+            }
+
+            if showInspector {
+                inspectorView
+                    .transition(sectionTransition)
+                    .accessibilitySortPriority(2)
+            }
+        }
+    }
+}
+
 private struct PlaylistRowView: View {
     let title: String
     let duration: String?
     let isPlayable: Bool
+    let density: DensityMetrics
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: density.playlistRowSpacing) {
             Text(title)
                 .lineLimit(1)
                 .foregroundStyle(isPlayable ? .primary : .secondary)
 
-            Spacer(minLength: 8)
+            Spacer(minLength: density.playlistRowSpacing / 2)
 
             if let duration {
                 Text(duration)
@@ -390,7 +575,8 @@ private struct PlaylistRowView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, density.playlistRowVerticalPadding)
+        .frame(minHeight: density.playlistRowHeight, alignment: .center)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(title)
         .accessibilityValue(duration ?? "Unknown length")
