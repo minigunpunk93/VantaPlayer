@@ -87,24 +87,16 @@ final class WindowChromeConfigurator {
 }
 
 private struct WindowChromeInstaller: ViewModifier {
-    @StateObject private var windowModeController = WindowModeController()
-    @AppStorage(AppStorageKeys.isCompactMode) private var isCompactMode = false
+    @StateObject private var windowCoordinator = WindowCoordinator()
 
     func body(content: Content) -> some View {
         content
-            .environment(\.chromeInsets, windowModeController.chromeInsets)
+            .environment(\.chromeInsets, windowCoordinator.chromeInsets)
             .background {
                 WindowAccessor { window in
-                    windowModeController.attach(window: window)
-                    windowModeController.setCompactModeEnabled(isCompactMode)
+                    windowCoordinator.attach(window: window)
                 }
                 .frame(width: 0, height: 0)
-            }
-            .onAppear {
-                windowModeController.setCompactModeEnabled(isCompactMode)
-            }
-            .onChange(of: isCompactMode) { _, newValue in
-                windowModeController.setCompactModeEnabled(newValue)
             }
     }
 }
