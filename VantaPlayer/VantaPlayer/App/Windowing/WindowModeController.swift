@@ -10,6 +10,10 @@ final class WindowModeController: NSObject, ObservableObject {
         width: CGFloat.greatestFiniteMagnitude,
         height: CGFloat.greatestFiniteMagnitude
     )
+    private let minCompactContentHeight: CGFloat = 120
+    private let defaultCompactContentHeight: CGFloat = 140
+    private let minCompactContentWidth: CGFloat = 420
+    private let frameApplyThreshold: CGFloat = 1.0
 
     @Published private(set) var chromeInsets = ChromeInsets.fallback
 
@@ -17,7 +21,13 @@ final class WindowModeController: NSObject, ObservableObject {
     private weak var proxiedDelegate: NSWindowDelegate?
 
     private var isCompactModeEnabled = false
-    private var compactTargetSize = NSSize(width: 390, height: 520)
+    private var cachedCompactWindowHeight: CGFloat?
+    private var lastNormalFrame: NSRect?
+    private var hasAppliedCompactFrame = false
+    private var lastCompactSizingHadInvalidDimensions = false
+    private var isApplyingWindowMode = false
+    private var pendingCompactApplyWorkItem: DispatchWorkItem?
+    private var pendingCompactRetryWorkItem: DispatchWorkItem?
 
     func attach(window: NSWindow) {
         guard self.window !== window else { return }
@@ -27,23 +37,36 @@ final class WindowModeController: NSObject, ObservableObject {
             existingWindow.delegate = proxiedDelegate
         }
 
+        cancelPendingCompactWorkItems()
         self.window = window
         proxiedDelegate = (window.delegate === self) ? nil : window.delegate
         window.delegate = self
         refreshChromeInsets(for: window)
 
         DispatchQueue.main.async { [weak self] in
-            self?.applyCurrentWindowMode(setContentSize: true)
+            self?.applyCurrentWindowMode(setContentSize: true, animateResize: false)
         }
     }
 
     func setCompactModeEnabled(_ enabled: Bool) {
+        guard isCompactModeEnabled != enabled else { return }
+        cancelPendingCompactWorkItems()
         isCompactModeEnabled = enabled
-        applyCurrentWindowMode(setContentSize: true)
+        cachedCompactWindowHeight = nil
+
+        if enabled {
+            scheduleCompactApply()
+        } else {
+            applyCurrentWindowMode(setContentSize: true, animateResize: true)
+        }
     }
 
-    private func applyCurrentWindowMode(setContentSize: Bool) {
+    private func applyCurrentWindowMode(setContentSize: Bool, animateResize: Bool) {
+        guard !isApplyingWindowMode else { return }
         guard let window else { return }
+        isApplyingWindowMode = true
+        defer { isApplyingWindowMode = false }
+
         refreshChromeInsets(for: window)
 
         if window.styleMask.contains(.fullScreen) {
@@ -52,32 +75,45 @@ final class WindowModeController: NSObject, ObservableObject {
         }
 
         if isCompactModeEnabled {
-            applyCompactMode(on: window, setContentSize: setContentSize)
+            applyCompactMode(on: window, setContentSize: setContentSize, animateResize: animateResize)
         } else {
-            applyNormalMode(on: window)
+            applyNormalMode(on: window, setContentSize: setContentSize, animateResize: animateResize)
         }
     }
 
-    private func applyCompactMode(on window: NSWindow, setContentSize: Bool) {
-        compactTargetSize = computeCompactSize(for: window)
+    private func applyCompactMode(on window: NSWindow, setContentSize: Bool, animateResize: Bool) {
+        let targetHeight = resolvedCompactWindowHeight(for: window)
 
         if setContentSize {
-            let currentSize = window.contentView?.frame.size ?? .zero
-            if !approximatelyEqual(currentSize, compactTargetSize) {
-                window.setContentSize(compactTargetSize)
+            if !hasAppliedCompactFrame {
+                lastNormalFrame = window.frame
             }
+
+            resizeWindowTopAnchored(
+                window,
+                targetHeight: targetHeight,
+                animate: animateResize && shouldAnimateWindowResize
+            )
+            hasAppliedCompactFrame = true
         }
 
-        if !approximatelyEqual(window.minSize, compactTargetSize) {
-            window.minSize = compactTargetSize
+        let compactMinSize = NSSize(width: normalMinSize.width, height: targetHeight)
+        let compactMaxSize = NSSize(width: unconstrainedSize.width, height: targetHeight)
+
+        if !approximatelyEqual(window.minSize, compactMinSize) {
+            window.minSize = compactMinSize
         }
 
-        if !approximatelyEqual(window.maxSize, compactTargetSize) {
-            window.maxSize = compactTargetSize
+        if !approximatelyEqual(window.maxSize, compactMaxSize) {
+            window.maxSize = compactMaxSize
         }
     }
 
-    private func applyNormalMode(on window: NSWindow) {
+    private func applyNormalMode(on window: NSWindow, setContentSize: Bool, animateResize: Bool) {
+        if setContentSize, hasAppliedCompactFrame {
+            restoreNormalFrame(on: window, animate: animateResize && shouldAnimateWindowResize)
+        }
+
         if !approximatelyEqual(window.minSize, normalMinSize) {
             window.minSize = normalMinSize
         }
@@ -85,6 +121,10 @@ final class WindowModeController: NSObject, ObservableObject {
         if !approximatelyEqual(window.maxSize, unconstrainedSize) {
             window.maxSize = unconstrainedSize
         }
+
+        hasAppliedCompactFrame = false
+        lastNormalFrame = nil
+        lastCompactSizingHadInvalidDimensions = false
     }
 
     private func relaxResizeLimitsForFullscreen(on window: NSWindow) {
@@ -92,40 +132,139 @@ final class WindowModeController: NSObject, ObservableObject {
         window.maxSize = unconstrainedSize
     }
 
-    private func computeCompactSize(for window: NSWindow) -> NSSize {
-        let visibleFrame: CGRect
-        if let screenFrame = window.screen?.visibleFrame {
-            visibleFrame = screenFrame
-        } else if let mainFrame = NSScreen.main?.visibleFrame {
-            visibleFrame = mainFrame
-        } else {
-            visibleFrame = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    private func resolvedCompactWindowHeight(for window: NSWindow) -> CGFloat {
+        if let cachedCompactWindowHeight {
+            return cachedCompactWindowHeight
         }
 
-        let ratio: CGFloat = 0.8
-        let targetArea = (visibleFrame.width * visibleFrame.height) / 6
+        let target = compactTarget(for: window, contentHeight: defaultCompactContentHeight)
 
-        var targetWidth = sqrt(targetArea * ratio)
-        var targetHeight = sqrt(targetArea / ratio)
+        cachedCompactWindowHeight = target.frameHeight
+        lastCompactSizingHadInvalidDimensions = target.hadInvalidDimensions
+        return target.frameHeight
+    }
 
-        let preferredMinWidth: CGFloat = 390
-        let preferredMinHeight: CGFloat = 520
-        let preferredMaxWidth: CGFloat = 540
-        let preferredMaxHeight: CGFloat = 760
+    private struct CompactTarget {
+        let frameHeight: CGFloat
+        let hadInvalidDimensions: Bool
+    }
 
-        let maxWidth = max(320, min(preferredMaxWidth, visibleFrame.width - 80))
-        let maxHeight = max(360, min(preferredMaxHeight, visibleFrame.height - 80))
-        let minWidth = min(preferredMinWidth, maxWidth)
-        let minHeight = min(preferredMinHeight, maxHeight)
+    private func compactTarget(for window: NSWindow, contentHeight: CGFloat) -> CompactTarget {
+        let safeContentHeight = max(minCompactContentHeight, contentHeight)
+        let (contentWidth, wasWidthInvalid) = compactContentWidth(for: window)
 
-        targetWidth = min(max(targetWidth, minWidth), maxWidth)
-        targetHeight = min(max(targetHeight, minHeight), maxHeight)
+        let minimumContentRect = NSRect(x: 0, y: 0, width: contentWidth, height: minCompactContentHeight)
+        let desiredContentRect = NSRect(x: 0, y: 0, width: contentWidth, height: safeContentHeight)
 
-        return NSSize(width: floor(targetWidth), height: floor(targetHeight))
+        let minimumFrameRect = window.frameRect(forContentRect: minimumContentRect)
+        let desiredFrameRect = window.frameRect(forContentRect: desiredContentRect)
+
+        let minimumFrameHeight: CGFloat
+        if minimumFrameRect.height.isFinite, minimumFrameRect.height > 0 {
+            minimumFrameHeight = floor(minimumFrameRect.height)
+        } else {
+            minimumFrameHeight = floor(max(window.frame.height, minCompactContentHeight))
+        }
+
+        let desiredFrameHeight: CGFloat
+        if desiredFrameRect.height.isFinite, desiredFrameRect.height > 0 {
+            desiredFrameHeight = floor(desiredFrameRect.height)
+        } else {
+            desiredFrameHeight = minimumFrameHeight
+        }
+
+        let targetFrameHeight = max(minimumFrameHeight, desiredFrameHeight)
+        let hadInvalidDimensions = wasWidthInvalid
+            || !(minimumFrameRect.height.isFinite && minimumFrameRect.height > 0)
+            || !(desiredFrameRect.height.isFinite && desiredFrameRect.height > 0)
+
+        return CompactTarget(
+            frameHeight: targetFrameHeight,
+            hadInvalidDimensions: hadInvalidDimensions
+        )
+    }
+
+    private func compactContentWidth(for window: NSWindow) -> (CGFloat, Bool) {
+        let layoutWidth = window.contentLayoutRect.width
+        guard layoutWidth.isFinite, layoutWidth > 0 else {
+            return (minCompactContentWidth, true)
+        }
+
+        return (max(layoutWidth, minCompactContentWidth), false)
+    }
+
+    private func scheduleCompactApply() {
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard self.isCompactModeEnabled else { return }
+            self.applyCurrentWindowMode(setContentSize: true, animateResize: true)
+            self.scheduleCompactRetryIfNeeded()
+        }
+
+        pendingCompactApplyWorkItem = workItem
+        DispatchQueue.main.async(execute: workItem)
+    }
+
+    private func scheduleCompactRetryIfNeeded() {
+        guard isCompactModeEnabled, lastCompactSizingHadInvalidDimensions else { return }
+
+        let retryWorkItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard self.isCompactModeEnabled else { return }
+            self.cachedCompactWindowHeight = nil
+            self.applyCurrentWindowMode(setContentSize: true, animateResize: false)
+        }
+
+        pendingCompactRetryWorkItem = retryWorkItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: retryWorkItem)
+    }
+
+    private func cancelPendingCompactWorkItems() {
+        pendingCompactApplyWorkItem?.cancel()
+        pendingCompactApplyWorkItem = nil
+        pendingCompactRetryWorkItem?.cancel()
+        pendingCompactRetryWorkItem = nil
+    }
+
+    private func restoreNormalFrame(on window: NSWindow, animate: Bool) {
+        guard let lastNormalFrame else { return }
+
+        let currentFrame = window.frame
+        let targetFrame = NSRect(
+            x: lastNormalFrame.minX,
+            y: currentFrame.maxY - lastNormalFrame.height,
+            width: lastNormalFrame.width,
+            height: lastNormalFrame.height
+        )
+
+        guard frameDiffersMeaningfully(currentFrame, targetFrame) else { return }
+        window.setFrame(targetFrame, display: true, animate: animate)
+    }
+
+    private func resizeWindowTopAnchored(_ window: NSWindow, targetHeight: CGFloat, animate: Bool) {
+        let oldFrame = window.frame
+        let newFrame = NSRect(
+            x: oldFrame.minX,
+            y: oldFrame.maxY - targetHeight,
+            width: oldFrame.width,
+            height: targetHeight
+        )
+
+        guard frameDiffersMeaningfully(oldFrame, newFrame) else { return }
+        window.setFrame(newFrame, display: true, animate: animate)
+    }
+
+    private var shouldAnimateWindowResize: Bool {
+        !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
     private func approximatelyEqual(_ lhs: NSSize, _ rhs: NSSize) -> Bool {
         abs(lhs.width - rhs.width) < 0.5 && abs(lhs.height - rhs.height) < 0.5
+    }
+
+    private func frameDiffersMeaningfully(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
+        abs(lhs.origin.y - rhs.origin.y) >= frameApplyThreshold ||
+        abs(lhs.size.height - rhs.size.height) >= frameApplyThreshold
     }
 
     private func refreshChromeInsets(for window: NSWindow) {
@@ -164,7 +303,7 @@ extension WindowModeController: NSWindowDelegate {
     nonisolated func windowDidExitFullScreen(_ notification: Notification) {
         MainActor.assumeIsolated { [weak self] in
             guard let self else { return }
-            self.applyCurrentWindowMode(setContentSize: true)
+            self.applyCurrentWindowMode(setContentSize: true, animateResize: false)
             self.proxiedDelegate?.windowDidExitFullScreen?(notification)
         }
     }
@@ -181,7 +320,7 @@ extension WindowModeController: NSWindowDelegate {
         MainActor.assumeIsolated { [weak self] in
             guard let self else { return }
             if self.isCompactModeEnabled {
-                self.applyCurrentWindowMode(setContentSize: true)
+                self.applyCurrentWindowMode(setContentSize: true, animateResize: false)
             }
             self.proxiedDelegate?.windowDidChangeScreen?(notification)
         }
