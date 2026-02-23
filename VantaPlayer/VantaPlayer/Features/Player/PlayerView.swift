@@ -111,23 +111,25 @@ struct PlayerView: View {
         .animation(sectionAnimation, value: isCompactMode)
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
-                Button {
-                    viewModel.openFilesPanel()
-                } label: {
-                    Label("Open Files", systemImage: "folder.badge.plus")
-                }
-                .help("Open audio files (⌘O)")
-                .accessibilityLabel("Open audio files")
-                .accessibilityHint("Open the import dialog")
+                if !isCompactMode {
+                    Button {
+                        viewModel.openFilesPanel()
+                    } label: {
+                        Label("Open Files", systemImage: "folder.badge.plus")
+                    }
+                    .help("Open audio files (⌘O)")
+                    .accessibilityLabel("Open audio files")
+                    .accessibilityHint("Open the import dialog")
 
-                Button {
-                    viewModel.openFolderPanel()
-                } label: {
-                    Label("Import Folder", systemImage: "folder.badge.gearshape")
+                    Button {
+                        viewModel.openFolderPanel()
+                    } label: {
+                        Label("Import Folder", systemImage: "folder.badge.gearshape")
+                    }
+                    .help("Import folder (⌘⇧O)")
+                    .accessibilityLabel("Import folder")
+                    .accessibilityHint("Scan a folder and add audio files")
                 }
-                .help("Import folder (⌘⇧O)")
-                .accessibilityLabel("Import folder")
-                .accessibilityHint("Scan a folder and add audio files")
             }
 
             ToolbarItemGroup(placement: .automatic) {
@@ -140,23 +142,25 @@ struct PlayerView: View {
                 .accessibilityLabel("Toggle compact mode")
                 .accessibilityHint("Switch between compact and normal layouts")
 
-                Button {
-                    togglePlaylistVisibility()
-                } label: {
-                    Image(systemName: isPlaylistVisible ? "list.bullet.rectangle.fill" : "list.bullet.rectangle")
-                }
-                .help("Toggle playlist (⌥⌘S)")
-                .accessibilityLabel("Toggle playlist")
-                .accessibilityHint("Show or hide the playlist section")
+                if !isCompactMode {
+                    Button {
+                        togglePlaylistVisibility()
+                    } label: {
+                        Image(systemName: isPlaylistVisible ? "list.bullet.rectangle.fill" : "list.bullet.rectangle")
+                    }
+                    .help("Toggle playlist (⌥⌘S)")
+                    .accessibilityLabel("Toggle playlist")
+                    .accessibilityHint("Show or hide the playlist section")
 
-                Button {
-                    toggleInspectorVisibility()
-                } label: {
-                    Image(systemName: isInspectorVisible ? "info.circle.fill" : "info.circle")
+                    Button {
+                        toggleInspectorVisibility()
+                    } label: {
+                        Image(systemName: isInspectorVisible ? "info.circle.fill" : "info.circle")
+                    }
+                    .help("Toggle inspector (⌥⌘I)")
+                    .accessibilityLabel("Toggle inspector")
+                    .accessibilityHint("Show or hide the inspector section")
                 }
-                .help("Toggle inspector (⌥⌘I)")
-                .accessibilityLabel("Toggle inspector")
-                .accessibilityHint("Show or hide the inspector section")
             }
         }
         .toolbarBackground(.hidden, for: .windowToolbar)
@@ -489,6 +493,8 @@ struct PlayerView: View {
     }
 
     private func togglePlaylistVisibility() {
+        guard !isCompactMode else { return }
+
         if reduceMotion {
             isPlaylistVisible.toggle()
         } else {
@@ -499,6 +505,8 @@ struct PlayerView: View {
     }
 
     private func toggleInspectorVisibility() {
+        guard !isCompactMode else { return }
+
         if reduceMotion {
             isInspectorVisible.toggle()
         } else {

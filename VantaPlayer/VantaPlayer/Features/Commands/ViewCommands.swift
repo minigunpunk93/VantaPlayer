@@ -23,14 +23,18 @@ struct ViewCommands: Commands {
             .keyboardShortcut("c", modifiers: [.control, .command])
 
             Button("Toggle Playlist") {
+                guard !isCompactMode else { return }
                 isPlaylistVisible.toggle()
             }
             .keyboardShortcut("s", modifiers: [.command, .option])
+            .disabled(isCompactMode)
 
             Button("Toggle Inspector") {
+                guard !isCompactMode else { return }
                 isInspectorVisible.toggle()
             }
             .keyboardShortcut("i", modifiers: [.command, .option])
+            .disabled(isCompactMode)
 
             Divider()
 
