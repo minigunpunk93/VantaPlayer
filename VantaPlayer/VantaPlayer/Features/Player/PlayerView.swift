@@ -38,12 +38,16 @@ struct PlayerView: View {
         return formatter
     }()
 
-    private var densityMode: DensityMode {
+    private var storedDensityMode: DensityMode {
         DensityMode(rawValue: densityModeRawValue) ?? .comfortable
     }
 
+    private var activeDensityMode: DensityMode {
+        isCompactMode ? .compact : storedDensityMode
+    }
+
     private var density: DensityMetrics {
-        densityMode.metrics
+        activeDensityMode.metrics
     }
 
     private var seekRange: ClosedRange<Double> {
@@ -77,18 +81,8 @@ struct PlayerView: View {
             .accessibilityHidden(true)
 
             if isCompactMode {
-                CompactPlayerLayoutView(
-                    density: density,
-                    sectionTransition: sectionTransition,
-                    showPlaylist: isPlaylistVisible,
-                    showInspector: isInspectorVisible,
-                    headerView: AnyView(nowPlayingHeader),
-                    queuePickerView: AnyView(queuePicker),
-                    inlineErrorView: inlineErrorBannerView,
-                    playlistView: AnyView(compactPlaylistSection),
-                    inspectorView: AnyView(inspectorSection),
-                    transportView: AnyView(transportStrip)
-                )
+                compactTransportOnlyStrip
+                    .accessibilitySortPriority(6)
             } else {
                 NormalPlayerLayoutView(
                     density: density,
@@ -99,7 +93,7 @@ struct PlayerView: View {
                     inlineErrorView: inlineErrorBannerView,
                     playlistView: AnyView(normalPlaylistSection),
                     inspectorView: AnyView(inspectorSection),
-                    transportView: AnyView(transportStrip)
+                    transportView: AnyView(normalTransportStrip)
                 )
             }
         }
@@ -203,7 +197,7 @@ struct PlayerView: View {
             isPlaying: viewModel.isPlaying,
             playbackDuration: viewModel.playbackDuration,
             isImporting: viewModel.isImporting,
-            densityMode: densityMode
+            densityMode: storedDensityMode
         )
     }
 
@@ -226,27 +220,10 @@ struct PlayerView: View {
         )
     }
 
-    private var queuePicker: some View {
-        QueuePickerView(
-            tracks: viewModel.tracks,
-            selectedTrackID: viewModel.selectedTrackID,
-            densityMode: densityMode
-        ) { trackID in
-            viewModel.playTrack(with: trackID)
-        }
-    }
-
     private var normalPlaylistSection: some View {
         playlistCard
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .accessibilitySortPriority(3)
-    }
-
-    private var compactPlaylistSection: some View {
-        playlistCard
-            .frame(maxWidth: .infinity)
-            .frame(maxHeight: density.compactPlaylistMaxHeight)
-            .accessibilitySortPriority(2)
     }
 
     private var playlistCard: some View {
@@ -307,13 +284,22 @@ struct PlayerView: View {
         InlineInspectorView(
             currentTrack: viewModel.currentTrack,
             trackCount: viewModel.tracks.count,
-            densityMode: densityMode,
+            densityMode: storedDensityMode,
             revealInFinder: revealInFinder
         )
         .accessibilitySortPriority(2)
     }
 
-    private var transportStrip: some View {
+    private var normalTransportStrip: some View {
+        transportStrip(isCompact: false)
+    }
+
+    private var compactTransportOnlyStrip: some View {
+        transportStrip(isCompact: true)
+    }
+
+    @ViewBuilder
+    private func transportStrip(isCompact: Bool) -> some View {
         HStack(spacing: density.transportSpacing) {
             Button {
                 viewModel.playPrevious()
@@ -347,6 +333,10 @@ struct PlayerView: View {
             .accessibilityLabel("Next track")
             .disabled(!viewModel.hasTracks)
 
+            if isCompact {
+                compactTrackMenu
+            }
+
             Text(timeString(scrubPosition))
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
@@ -378,6 +368,17 @@ struct PlayerView: View {
                 .frame(width: density.volumeSliderWidth)
                 .help("Volume")
                 .accessibilityLabel("Volume")
+
+            if isCompact {
+                Button {
+                    toggleCompactMode()
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                }
+                .buttonStyle(.plain)
+                .help("Exit compact mode")
+                .accessibilityLabel("Exit compact mode")
+            }
         }
         .controlSize(density.controlSize)
         .padding(.horizontal, density.transportHorizontalPadding)
@@ -388,6 +389,55 @@ struct PlayerView: View {
                 .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
         )
         .accessibilityElement(children: .contain)
+    }
+
+    private var compactTrackMenu: some View {
+        Menu {
+            if viewModel.tracks.isEmpty {
+                Text("No tracks in queue")
+            } else {
+                ForEach(viewModel.tracks) { track in
+                    Button {
+                        viewModel.playTrack(with: track.id)
+                    } label: {
+                        if track.id == viewModel.selectedTrackID {
+                            Label(track.title, systemImage: "checkmark")
+                        } else {
+                            Text(track.title)
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(compactTrackTitle)
+                    .font(.caption)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 140, alignment: .leading)
+
+                Image(systemName: "chevron.down")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(.thinMaterial, in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .controlSize(.small)
+        .disabled(viewModel.tracks.isEmpty)
+        .help("Choose track")
+        .accessibilityLabel("Track queue")
+        .accessibilityValue(compactTrackTitle)
+    }
+
+    private var compactTrackTitle: String {
+        guard let selectedTrackID = viewModel.selectedTrackID,
+              let selectedTrack = viewModel.tracks.first(where: { $0.id == selectedTrackID }) else {
+            return "Queue"
+        }
+        return selectedTrack.title
     }
 
     private func applyCompactModeDefaultsOnAppearIfNeeded() {
@@ -508,49 +558,6 @@ private struct NormalPlayerLayoutView: View {
 
             transportView
                 .accessibilitySortPriority(1)
-        }
-    }
-}
-
-private struct CompactPlayerLayoutView: View {
-    let density: DensityMetrics
-    let sectionTransition: AnyTransition
-    let showPlaylist: Bool
-    let showInspector: Bool
-    let headerView: AnyView
-    let queuePickerView: AnyView
-    let inlineErrorView: AnyView?
-    let playlistView: AnyView
-    let inspectorView: AnyView
-    let transportView: AnyView
-
-    var body: some View {
-        VStack(spacing: density.sectionSpacing) {
-            headerView
-                .accessibilitySortPriority(6)
-
-            queuePickerView
-                .accessibilitySortPriority(5)
-
-            if let inlineErrorView {
-                inlineErrorView
-                    .transition(sectionTransition)
-            }
-
-            transportView
-                .accessibilitySortPriority(4)
-
-            if showPlaylist {
-                playlistView
-                    .transition(sectionTransition)
-                    .accessibilitySortPriority(3)
-            }
-
-            if showInspector {
-                inspectorView
-                    .transition(sectionTransition)
-                    .accessibilitySortPriority(2)
-            }
         }
     }
 }
