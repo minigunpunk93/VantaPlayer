@@ -38,10 +38,9 @@ final class PlayerViewModel: ObservableObject {
     private var playbackPositions: [Track.ID: TimeInterval] = [:]
 
     private let bookmarksStore = BookmarksStore()
-    private lazy var sessionStore = SessionStore(bookmarksStore: bookmarksStore)
+    private let sessionStore: SessionStore
 
     private var audioPlayer: AudioEnginePlayer?
-    private var audioAnalyzer: AudioAnalyzer?
 
     private var playerCancellables: Set<AnyCancellable> = []
     private var importTask: Task<Void, Never>?
@@ -67,6 +66,10 @@ final class PlayerViewModel: ObservableObject {
         }
         return types
     }()
+
+    init() {
+        sessionStore = SessionStore(bookmarksStore: bookmarksStore)
+    }
 
     var isPlaying: Bool {
         audioPlayer?.isPlaying ?? false
@@ -352,24 +355,6 @@ final class PlayerViewModel: ObservableObject {
         inlineError = nil
     }
 
-    func visualizerSnapshot(reduceMotion: Bool) -> VisualizerView.PlaybackSnapshot {
-        let frame = audioAnalyzer?.latestFrame() ?? AudioAnalyzer.AnalysisFrame(
-            spectrum: [Float](repeating: 0, count: AudioAnalyzer.defaultOutputBinCount),
-            energy: 0
-        )
-
-        let idleEnergy: Float = reduceMotion ? 0.035 : 0.06
-        let resolvedEnergy = isPlaying ? frame.energy : max(frame.energy, idleEnergy)
-
-        return VisualizerView.PlaybackSnapshot(
-            isPlaying: isPlaying,
-            playbackTime: playbackTime,
-            energy: resolvedEnergy,
-            spectrum: frame.spectrum,
-            reduceMotion: reduceMotion
-        )
-    }
-
     func handleKeyDown(_ event: NSEvent) -> NSEvent? {
         guard !isTextInputFocused(window: event.window ?? NSApp.keyWindow) else {
             return event
@@ -403,14 +388,8 @@ final class PlayerViewModel: ObservableObject {
             return audioPlayer
         }
 
-        let analyzer = AudioAnalyzer(
-            fftSize: AudioAnalyzer.defaultFFTSize,
-            hopSize: AudioAnalyzer.defaultHopSize,
-            outputBinCount: AudioAnalyzer.defaultOutputBinCount,
-            targetFPS: 60
-        )
-
-        let player = AudioEnginePlayer(analyzer: analyzer)
+        // Keep visualizer/analyzer inactive in M2.0: no Metal view is mounted, and we avoid FFT tap work.
+        let player = AudioEnginePlayer()
         player.setVolume(preferredVolume)
         player.onPlaybackEnded = { [weak self] in
             Task { @MainActor in
@@ -450,7 +429,6 @@ final class PlayerViewModel: ObservableObject {
             }
             .store(in: &playerCancellables)
 
-        audioAnalyzer = analyzer
         audioPlayer = player
 
         return player
@@ -811,8 +789,8 @@ final class PlayerViewModel: ObservableObject {
 }
 
 private enum TrackImportWorker {
-    static func makeTrack(from url: URL) async -> Track {
-        let normalized = normalizedURL(url)
+    nonisolated static func makeTrack(from url: URL) async -> Track {
+        let normalized = url.standardizedFileURL.resolvingSymlinksInPath()
         let fallbackTitle = normalized.deletingPathExtension().lastPathComponent
         let asset = AVURLAsset(url: normalized)
 
@@ -864,13 +842,17 @@ private enum TrackImportWorker {
         }
     }
 
-    static func folderAudioFilesStream(
+    nonisolated static func folderAudioFilesStream(
         rootURL: URL,
         allowedExtensions: Set<String>,
         excluding existing: Set<URL>
     ) -> AsyncStream<URL> {
-        let normalizedRoot = normalizedURL(rootURL)
-        let normalizedExisting = Set(existing.map(normalizedURL))
+        func normalize(_ url: URL) -> URL {
+            url.standardizedFileURL.resolvingSymlinksInPath()
+        }
+
+        let normalizedRoot = normalize(rootURL)
+        let normalizedExisting = Set(existing.map(normalize))
 
         return AsyncStream { continuation in
             let scanner = Task.detached(priority: .utility) {
@@ -892,7 +874,7 @@ private enum TrackImportWorker {
                 while let candidateURL = enumerator.nextObject() as? URL {
                     if Task.isCancelled { break }
 
-                    let normalizedCandidate = normalizedURL(candidateURL)
+                    let normalizedCandidate = normalize(candidateURL)
                     let extensionLowercased = normalizedCandidate.pathExtension.lowercased()
                     guard allowedExtensions.contains(extensionLowercased) else { continue }
 
@@ -918,7 +900,7 @@ private enum TrackImportWorker {
         }
     }
 
-    private static func metadataString(for key: AVMetadataKey, in metadata: [AVMetadataItem]) async -> String? {
+    private nonisolated static func metadataString(for key: AVMetadataKey, in metadata: [AVMetadataItem]) async -> String? {
         guard let item = metadata.first(where: { $0.commonKey == key }),
               let loadedValue = try? await item.load(.stringValue) else {
             return nil
@@ -928,7 +910,7 @@ private enum TrackImportWorker {
         return value.isEmpty ? nil : value
     }
 
-    private static func metadataArtworkData(in metadata: [AVMetadataItem]) async -> Data? {
+    private nonisolated static func metadataArtworkData(in metadata: [AVMetadataItem]) async -> Data? {
         guard let item = metadata.first(where: { $0.commonKey == .commonKeyArtwork }) else {
             return nil
         }
@@ -946,9 +928,5 @@ private enum TrackImportWorker {
         }
 
         return nil
-    }
-
-    private static func normalizedURL(_ url: URL) -> URL {
-        url.standardizedFileURL.resolvingSymlinksInPath()
     }
 }

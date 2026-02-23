@@ -50,12 +50,12 @@ final class SessionStore: @unchecked Sendable {
     private let decoder = JSONDecoder()
     private let maxArtworkBytes = 512 * 1024
 
-    init(defaults: UserDefaults = .standard, bookmarksStore: BookmarksStore) {
+    nonisolated init(defaults: UserDefaults = .standard, bookmarksStore: BookmarksStore) {
         self.defaults = defaults
         self.bookmarksStore = bookmarksStore
     }
 
-    func save(snapshot: Snapshot) {
+    nonisolated func save(snapshot: Snapshot) {
         let queue = snapshot.tracks.compactMap { persistedTrack(from: $0) }
         let state = PersistedSession(
             queue: queue,
@@ -73,7 +73,7 @@ final class SessionStore: @unchecked Sendable {
         defaults.set(encoded, forKey: Keys.session)
     }
 
-    func restore() -> RestoredSession? {
+    nonisolated func restore() -> RestoredSession? {
         guard let encoded = defaults.data(forKey: Keys.session),
               let state = try? decoder.decode(PersistedSession.self, from: encoded) else {
             return nil
@@ -96,7 +96,7 @@ final class SessionStore: @unchecked Sendable {
         )
     }
 
-    private func persistedTrack(from track: Track) -> PersistedTrack? {
+    private nonisolated func persistedTrack(from track: Track) -> PersistedTrack? {
         let bookmarkData = track.bookmarkData ?? (try? bookmarksStore.makeBookmark(for: track.url))
         let trimmedArtwork = track.artworkData.flatMap { data -> Data? in
             data.count <= maxArtworkBytes ? data : nil
@@ -115,7 +115,7 @@ final class SessionStore: @unchecked Sendable {
         )
     }
 
-    private func restoredTrack(from track: PersistedTrack) -> Track? {
+    private nonisolated func restoredTrack(from track: PersistedTrack) -> Track? {
         let resolvedURL: URL
         var resolvedBookmarkData = track.bookmarkData
 

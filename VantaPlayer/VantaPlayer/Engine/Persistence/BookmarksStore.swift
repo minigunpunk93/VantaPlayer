@@ -9,7 +9,7 @@ final class BookmarksStore: @unchecked Sendable {
     private let lock = NSLock()
     private var activeAccessCounts: [URL: Int] = [:]
 
-    func makeBookmark(for url: URL) throws -> Data {
+    nonisolated func makeBookmark(for url: URL) throws -> Data {
         try normalizedURL(for: url).bookmarkData(
             options: [.withSecurityScope],
             includingResourceValuesForKeys: nil,
@@ -17,7 +17,7 @@ final class BookmarksStore: @unchecked Sendable {
         )
     }
 
-    func resolveBookmark(_ bookmarkData: Data) -> ResolvedBookmark? {
+    nonisolated func resolveBookmark(_ bookmarkData: Data) -> ResolvedBookmark? {
         var isStale = false
 
         guard let resolvedURL = try? URL(
@@ -42,7 +42,7 @@ final class BookmarksStore: @unchecked Sendable {
     }
 
     @discardableResult
-    func beginAccess(to url: URL) -> Bool {
+    nonisolated func beginAccess(to url: URL) -> Bool {
         let normalized = normalizedURL(for: url)
         let started = normalized.startAccessingSecurityScopedResource()
         guard started else { return false }
@@ -54,7 +54,7 @@ final class BookmarksStore: @unchecked Sendable {
         return true
     }
 
-    func endAccess(to url: URL) {
+    nonisolated func endAccess(to url: URL) {
         let normalized = normalizedURL(for: url)
         var shouldStop = false
 
@@ -74,7 +74,7 @@ final class BookmarksStore: @unchecked Sendable {
         }
     }
 
-    private func normalizedURL(for url: URL) -> URL {
+    private nonisolated func normalizedURL(for url: URL) -> URL {
         url.standardizedFileURL.resolvingSymlinksInPath()
     }
 }

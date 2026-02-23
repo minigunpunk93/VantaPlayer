@@ -3,11 +3,30 @@ import SwiftUI
 
 struct PlayerView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     @ObservedObject var viewModel: PlayerViewModel
+    @Binding var isPlaylistVisible: Bool
+    @Binding var isInspectorVisible: Bool
 
     @State private var dropTargetActive = false
     @State private var scrubPosition: Double = 0
     @State private var isScrubbing = false
+
+    private static let minuteFormatter: DateComponentsFormatter = {
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = [.minute, .second]
+        formatter.unitsStyle = .positional
+        formatter.zeroFormattingBehavior = [.pad]
+        return formatter
+    }()
+
+    private static let hourFormatter: DateComponentsFormatter = {
+        let formatter = DateComponentsFormatter()
+        formatter.allowedUnits = [.hour, .minute, .second]
+        formatter.unitsStyle = .positional
+        formatter.zeroFormattingBehavior = [.pad]
+        return formatter
+    }()
 
     private var seekRange: ClosedRange<Double> {
         let duration = max(viewModel.playbackDuration, 1)
@@ -21,25 +40,59 @@ struct PlayerView: View {
         )
     }
 
+    private var sectionAnimation: Animation? {
+        reduceMotion ? nil : .easeInOut(duration: 0.18)
+    }
+
+    private var sectionTransition: AnyTransition {
+        reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98, anchor: .top))
+    }
+
     var body: some View {
-        NavigationSplitView {
-            PlaylistSidebarView(
-                tracks: viewModel.tracks,
-                selection: $viewModel.selectedTrackID,
-                isImporting: viewModel.isImporting,
-                importProgressLabel: viewModel.importProgressLabel,
-                onSelect: viewModel.playTrack(with:),
-                onMove: viewModel.moveTracks(from:to:),
-                onRemove: viewModel.removeTrack(id:)
+        VStack(spacing: 12) {
+            NowPlayingHeaderView(
+                currentTrack: viewModel.currentTrack,
+                isPlaying: viewModel.isPlaying,
+                playbackDuration: viewModel.playbackDuration,
+                isImporting: viewModel.isImporting
             )
-            .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 300)
-        } content: {
-            contentColumn
-        } detail: {
-            inspectorColumn
-                .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 280)
+            .accessibilitySortPriority(4)
+
+            if let inlineError = viewModel.inlineError {
+                InlineErrorBanner(
+                    message: inlineError.message,
+                    showRemoveAction: inlineError.trackID != nil,
+                    onRemove: {
+                        if let trackID = inlineError.trackID {
+                            viewModel.removeTrack(id: trackID)
+                        }
+                    },
+                    onDismiss: viewModel.dismissInlineError
+                )
+                .transition(sectionTransition)
+            }
+
+            middleSection
+                .accessibilitySortPriority(3)
+
+            if isInspectorVisible {
+                InlineInspectorView(
+                    currentTrack: viewModel.currentTrack,
+                    trackCount: viewModel.tracks.count,
+                    revealInFinder: revealInFinder
+                )
+                .transition(sectionTransition)
+                .accessibilitySortPriority(2)
+            }
+
+            transportStrip
+                .accessibilitySortPriority(1)
         }
-        .navigationSplitViewStyle(.balanced)
+        .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .animation(sectionAnimation, value: isPlaylistVisible)
+        .animation(sectionAnimation, value: isInspectorVisible)
+        .animation(sectionAnimation, value: viewModel.inlineError != nil)
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
                 Button {
@@ -47,7 +100,7 @@ struct PlayerView: View {
                 } label: {
                     Label("Open Files", systemImage: "folder.badge.plus")
                 }
-                .help("Open audio files (\u{2318}O)")
+                .help("Open audio files (⌘O)")
                 .accessibilityLabel("Open audio files")
                 .accessibilityHint("Open the import dialog")
 
@@ -56,66 +109,29 @@ struct PlayerView: View {
                 } label: {
                     Label("Import Folder", systemImage: "folder.badge.gearshape")
                 }
-                .help("Import folder (\u{2318}\u{21E7}O)")
+                .help("Import folder (⌘⇧O)")
                 .accessibilityLabel("Import folder")
                 .accessibilityHint("Scan a folder and add audio files")
             }
 
-            ToolbarItem(placement: .principal) {
-                VStack(spacing: 2) {
-                    Text(viewModel.currentTrack?.title ?? "VantaPlayer")
-                        .font(.headline)
-                        .lineLimit(1)
-
-                    if let subtitle = viewModel.currentTrack?.subtitle {
-                        Text(subtitle)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-                }
-                .frame(maxWidth: 320)
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel(viewModel.currentTrack?.title ?? "No track selected")
-            }
-
-            ToolbarItemGroup(placement: .primaryAction) {
+            ToolbarItemGroup(placement: .automatic) {
                 Button {
-                    viewModel.playPrevious()
+                    togglePlaylistVisibility()
                 } label: {
-                    Image(systemName: "backward.end.fill")
+                    Image(systemName: isPlaylistVisible ? "sidebar.leading" : "sidebar.left")
                 }
-                .help("Previous track")
-                .accessibilityLabel("Previous track")
-                .accessibilityHint("Play the previous track in the playlist")
-                .disabled(!viewModel.hasTracks)
+                .help("Toggle playlist (⌥⌘S)")
+                .accessibilityLabel("Toggle playlist")
+                .accessibilityHint("Show or hide the playlist section")
 
                 Button {
-                    viewModel.togglePlayPause()
+                    toggleInspectorVisibility()
                 } label: {
-                    Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
+                    Image(systemName: isInspectorVisible ? "sidebar.right" : "info.circle")
                 }
-                .help("Play or pause (Space)")
-                .accessibilityLabel(viewModel.isPlaying ? "Pause" : "Play")
-                .accessibilityHint("Toggle playback")
-                .disabled(!viewModel.hasTracks)
-
-                Button {
-                    viewModel.playNext()
-                } label: {
-                    Image(systemName: "forward.end.fill")
-                }
-                .help("Next track")
-                .accessibilityLabel("Next track")
-                .accessibilityHint("Play the next track in the playlist")
-                .disabled(!viewModel.hasTracks)
-
-                if viewModel.isImporting {
-                    ToolbarImportProgressView(
-                        label: viewModel.importProgressLabel ?? "Importing…",
-                        fraction: viewModel.importProgressFraction
-                    )
-                }
+                .help("Toggle inspector (⌥⌘I)")
+                .accessibilityLabel("Toggle inspector")
+                .accessibilityHint("Show or hide the inspector section")
             }
         }
         .background(
@@ -139,43 +155,23 @@ struct PlayerView: View {
                 scrubPosition = newDuration
             }
         }
+        .onChange(of: viewModel.selectedTrackID) { _, newValue in
+            guard let newValue else { return }
+            viewModel.playTrack(with: newValue)
+        }
     }
 
-    private var contentColumn: some View {
-        ZStack(alignment: .bottom) {
-            VisualizerView(snapshot: viewModel.visualizerSnapshot(reduceMotion: reduceMotion))
-            .overlay(alignment: .topLeading) {
-                if let inlineError = viewModel.inlineError {
-                    InlineErrorBanner(
-                        message: inlineError.message,
-                        showRemoveAction: inlineError.trackID != nil,
-                        onRemove: {
-                            if let trackID = inlineError.trackID {
-                                viewModel.removeTrack(id: trackID)
-                            }
-                        },
-                        onDismiss: viewModel.dismissInlineError
-                    )
-                    .padding(16)
-                }
+    private var middleSection: some View {
+        Group {
+            if isPlaylistVisible {
+                playlistSection
+                    .transition(sectionTransition)
+            } else {
+                hiddenPlaylistSection
+                    .transition(sectionTransition)
             }
-            .overlay {
-                if viewModel.tracks.isEmpty {
-                    EmptyStateView(
-                        isDropTargeted: dropTargetActive,
-                        reduceMotion: reduceMotion,
-                        isRestoringSession: viewModel.isRestoringSession
-                    )
-                }
-            }
-            .accessibilityLabel("Visualizer")
-            .accessibilityHint("Background visualization responding to playback state")
-            .accessibilitySortPriority(1)
-
-            transportBar
-                .padding(20)
-                .accessibilitySortPriority(2)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .dropDestination(for: URL.self) { droppedURLs, _ in
             viewModel.importTracks(from: droppedURLs)
             return !droppedURLs.isEmpty
@@ -184,7 +180,86 @@ struct PlayerView: View {
         }
     }
 
-    private var transportBar: some View {
+    private var playlistSection: some View {
+        VStack(spacing: 0) {
+            if viewModel.isImporting {
+                ImportProgressStrip(
+                    label: viewModel.importProgressLabel ?? "Importing…",
+                    fraction: viewModel.importProgressFraction
+                )
+            }
+
+            if viewModel.tracks.isEmpty {
+                PlaylistEmptyStateView(
+                    isDropTargeted: dropTargetActive,
+                    reduceMotion: reduceMotion,
+                    isRestoringSession: viewModel.isRestoringSession
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                List(selection: $viewModel.selectedTrackID) {
+                    ForEach(viewModel.tracks) { track in
+                        PlaylistRowView(
+                            title: track.title,
+                            duration: track.duration.map(timeString),
+                            isPlayable: track.isPlayable
+                        )
+                        .tag(track.id)
+                        .contentShape(Rectangle())
+                        .contextMenu {
+                            Button("Remove") {
+                                viewModel.removeTrack(id: track.id)
+                            }
+                        }
+                        .accessibilityHint(track.isPlayable ? "Play this track" : "Track cannot be played")
+                    }
+                    .onMove(perform: viewModel.moveTracks(from:to:))
+                }
+                .listStyle(.inset(alternatesRowBackgrounds: false))
+                .scrollContentBackground(.hidden)
+                .background(Color.clear)
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(.regularMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(dropTargetActive ? Color.accentColor.opacity(0.7) : Color.white.opacity(0.08), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Playlist")
+    }
+
+    private var hiddenPlaylistSection: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "music.note.list")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+
+            Text("Playlist hidden")
+                .font(.subheadline.weight(.medium))
+
+            Text("Use ⌥⌘S to show it")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(.thinMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Playlist hidden")
+    }
+
+    private var transportStrip: some View {
         HStack(spacing: 10) {
             Button {
                 viewModel.playPrevious()
@@ -194,19 +269,18 @@ struct PlayerView: View {
             .buttonStyle(.borderless)
             .help("Previous track")
             .accessibilityLabel("Previous track")
-            .accessibilityHint("Play previous track")
             .disabled(!viewModel.hasTracks)
 
             Button {
                 viewModel.togglePlayPause()
             } label: {
-                Image(systemName: viewModel.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                    .font(.system(size: 22, weight: .semibold))
+                Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 16)
             }
             .buttonStyle(.plain)
             .help("Play or pause")
             .accessibilityLabel(viewModel.isPlaying ? "Pause" : "Play")
-            .accessibilityHint("Toggle playback")
             .disabled(!viewModel.hasTracks)
 
             Button {
@@ -217,7 +291,6 @@ struct PlayerView: View {
             .buttonStyle(.borderless)
             .help("Next track")
             .accessibilityLabel("Next track")
-            .accessibilityHint("Play next track")
             .disabled(!viewModel.hasTracks)
 
             Text(timeString(scrubPosition))
@@ -237,7 +310,6 @@ struct PlayerView: View {
             )
             .help("Seek")
             .accessibilityLabel("Playback position")
-            .accessibilityHint("Adjust the current playhead position")
             .disabled(!viewModel.hasTracks)
 
             Text(timeString(viewModel.playbackDuration))
@@ -249,114 +321,94 @@ struct PlayerView: View {
                 .foregroundStyle(.secondary)
 
             Slider(value: volumeBinding, in: 0...1)
-                .frame(width: 110)
+                .frame(width: 108)
                 .help("Volume")
                 .accessibilityLabel("Volume")
-                .accessibilityHint("Adjust playback volume")
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(.white.opacity(0.08))
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
         )
-        .frame(maxWidth: 760)
         .accessibilityElement(children: .contain)
     }
 
-    private var inspectorColumn: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Inspector")
-                .font(.headline)
-
-            if let currentTrack = viewModel.currentTrack {
-                if let artworkData = currentTrack.artworkData,
-                   let artwork = NSImage(data: artworkData) {
-                    Image(nsImage: artwork)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: 84, height: 84)
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .accessibilityHidden(true)
-                }
-
-                Text(currentTrack.title)
-                    .font(.body.weight(.semibold))
-                    .lineLimit(2)
-
-                if let artist = currentTrack.artist, !artist.isEmpty {
-                    Label(artist, systemImage: "person")
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                if let album = currentTrack.album, !album.isEmpty {
-                    Label(album, systemImage: "rectangle.stack")
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                if let duration = currentTrack.duration, duration > 0 {
-                    Label(timeString(duration), systemImage: "clock")
-                        .foregroundStyle(.secondary)
-                } else {
-                    Label("Unknown length", systemImage: "clock")
-                        .foregroundStyle(.secondary)
-                }
-
-                Label(currentTrack.url.lastPathComponent, systemImage: "doc")
-                    .lineLimit(2)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("Select a track to see details.")
-                    .foregroundStyle(.secondary)
+    private func togglePlaylistVisibility() {
+        if reduceMotion {
+            isPlaylistVisible.toggle()
+        } else {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                isPlaylistVisible.toggle()
             }
-
-            Divider()
-
-            Label("\(viewModel.tracks.count) tracks", systemImage: "music.note.list")
-                .foregroundStyle(.secondary)
-
-            Spacer()
         }
-        .padding(18)
-        .accessibilityElement(children: .contain)
+    }
+
+    private func toggleInspectorVisibility() {
+        if reduceMotion {
+            isInspectorVisible.toggle()
+        } else {
+            withAnimation(.easeInOut(duration: 0.18)) {
+                isInspectorVisible.toggle()
+            }
+        }
+    }
+
+    private func revealInFinder(_ fileURL: URL) {
+        NSWorkspace.shared.activateFileViewerSelecting([fileURL])
     }
 
     private func timeString(_ seconds: TimeInterval) -> String {
         guard seconds.isFinite, seconds > 0 else { return "0:00" }
 
-        let formatter = DateComponentsFormatter()
-        formatter.allowedUnits = seconds >= 3600 ? [.hour, .minute, .second] : [.minute, .second]
-        formatter.unitsStyle = .positional
-        formatter.zeroFormattingBehavior = [.pad]
+        if seconds >= 3600 {
+            return Self.hourFormatter.string(from: seconds) ?? "0:00"
+        }
 
-        return formatter.string(from: seconds) ?? "0:00"
+        return Self.minuteFormatter.string(from: seconds) ?? "0:00"
     }
 }
 
-private struct EmptyStateView: View {
+private struct PlaylistRowView: View {
+    let title: String
+    let duration: String?
+    let isPlayable: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(title)
+                .lineLimit(1)
+                .foregroundStyle(isPlayable ? .primary : .secondary)
+
+            Spacer(minLength: 8)
+
+            if let duration {
+                Text(duration)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(title)
+        .accessibilityValue(duration ?? "Unknown length")
+    }
+}
+
+private struct PlaylistEmptyStateView: View {
     let isDropTargeted: Bool
     let reduceMotion: Bool
     let isRestoringSession: Bool
 
     var body: some View {
-        VStack(spacing: 14) {
-            Image(systemName: "square.and.arrow.down.on.square")
-                .font(.system(size: 34, weight: .light))
+        VStack(spacing: 10) {
+            Image(systemName: "square.and.arrow.down")
+                .font(.system(size: 28, weight: .light))
                 .foregroundStyle(.secondary)
 
             Text("Drop audio here or press ⌘O")
-                .font(.title3.weight(.medium))
-
-            Text("Use ⌘⇧O to import a full folder.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-
-            Text("Supports wav, mp3, m4a, aiff, and flac.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                .font(.headline)
 
             if isRestoringSession {
                 HStack(spacing: 8) {
@@ -366,22 +418,22 @@ private struct EmptyStateView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                .padding(.top, 6)
+                .padding(.top, 2)
             }
         }
-        .padding(32)
-        .frame(maxWidth: 460)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .strokeBorder(
-                    isDropTargeted ? .white.opacity(0.55) : .white.opacity(0.12),
-                    lineWidth: isDropTargeted ? 2 : 1
-                )
-        )
-        .scaleEffect(isDropTargeted && !reduceMotion ? 1.02 : 1)
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: isDropTargeted)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(24)
+        .contentShape(Rectangle())
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(
+                    isDropTargeted ? Color.accentColor.opacity(0.7) : Color.clear,
+                    lineWidth: isDropTargeted ? 2 : 0
+                )
+                .padding(12)
+        )
+        .scaleEffect(isDropTargeted && !reduceMotion ? 1.01 : 1)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.14), value: isDropTargeted)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Drop audio here or press command O")
         .accessibilityHint("Import files to start playback")
@@ -406,7 +458,8 @@ private struct InlineErrorBanner: View {
             Spacer(minLength: 8)
 
             if showRemoveAction {
-                Button("Remove from playlist", action: onRemove)
+                Button("Remove", action: onRemove)
+                    .buttonStyle(.link)
             }
 
             Button("Dismiss", action: onDismiss)
@@ -416,34 +469,37 @@ private struct InlineErrorBanner: View {
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(.white.opacity(0.12))
+                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
         )
-        .frame(maxWidth: 520)
+        .accessibilityElement(children: .contain)
     }
 }
 
-private struct ToolbarImportProgressView: View {
+private struct ImportProgressStrip: View {
     let label: String
     let fraction: Double?
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             if let fraction {
                 ProgressView(value: fraction)
-                    .frame(width: 56)
                     .controlSize(.small)
+                    .frame(width: 72)
             } else {
                 ProgressView()
                     .controlSize(.small)
             }
 
             Text(label)
-                .font(.caption2)
+                .font(.caption)
                 .foregroundStyle(.secondary)
+
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial)
+        .accessibilityElement(children: .combine)
         .accessibilityLabel(label)
     }
 }
@@ -462,32 +518,29 @@ private struct KeyboardEventMonitor: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.onKeyDown = onKeyDown
-    }
-
-    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
-        coordinator.stop()
+        context.coordinator.start()
     }
 
     final class Coordinator {
         var onKeyDown: (NSEvent) -> NSEvent?
-        private var monitor: Any?
+        private var monitorToken: Any?
 
         init(onKeyDown: @escaping (NSEvent) -> NSEvent?) {
             self.onKeyDown = onKeyDown
         }
 
-        func start() {
-            guard monitor == nil else { return }
-            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self else { return event }
-                return self.onKeyDown(event)
+        deinit {
+            if let monitorToken {
+                NSEvent.removeMonitor(monitorToken)
             }
         }
 
-        func stop() {
-            guard let monitor else { return }
-            NSEvent.removeMonitor(monitor)
-            self.monitor = nil
+        func start() {
+            guard monitorToken == nil else { return }
+            monitorToken = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self else { return event }
+                return self.onKeyDown(event)
+            }
         }
     }
 }

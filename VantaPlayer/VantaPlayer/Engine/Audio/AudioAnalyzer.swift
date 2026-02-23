@@ -1,28 +1,28 @@
 import Accelerate
 import AVFoundation
-import Combine
 import Foundation
 import QuartzCore
 
-final class AudioAnalyzer: ObservableObject {
-    struct AnalysisFrame: Sendable {
-        var spectrum: [Float]
-        var energy: Float
-    }
-
+final class AudioAnalyzer {
     static let defaultFFTSize = 2048
     static let defaultHopSize = 512
-    static let defaultOutputBinCount = 96
+    static let defaultOutputBinCount = 256
 
-    @Published private(set) var spectrum: [Float]
-    @Published private(set) var energy: Float = 0
+    let spectrumStore: SpectrumStore
 
     private let fftSize: Int
     private let hopSize: Int
-    private let outputBinCount: Int
-    private let publishInterval: CFTimeInterval
     private let analysisQueue = DispatchQueue(label: "VantaPlayer.AudioAnalyzer", qos: .userInitiated)
-    private let outputLock = NSLock()
+
+    private let minDecibels: Float = -80
+    private let maxDecibels: Float = 0
+    private let mappingGamma: Float = 0.62
+    private let mappingGain: Float = 1.95
+
+    private let attackTime: Float = 0.024
+    private let releaseTime: Float = 0.16
+    private let energyAttackTime: Float = 0.055
+    private let energyReleaseTime: Float = 0.28
 
     private var tapNode: AVAudioNode?
     private var tapBus: AVAudioNodeBus = 0
@@ -35,49 +35,43 @@ final class AudioAnalyzer: ObservableObject {
     private var splitReal: [Float]
     private var splitImag: [Float]
     private var magnitudes: [Float]
-    private var thresholdedMagnitudes: [Float]
     private var decibels: [Float]
     private var collapsedBins: [Float]
     private var smoothedBins: [Float]
+
     private var sampleCursor = 0
     private var hopSampleCounter = 0
-    private var lastPublishTime: CFTimeInterval = 0
-    private var latestFrameStorage: AnalysisFrame
+    private var smoothedEnergy: Float = 0
+    private var lastSmoothingTimestamp: CFTimeInterval = 0
 
     init(
         fftSize: Int = AudioAnalyzer.defaultFFTSize,
         hopSize: Int = AudioAnalyzer.defaultHopSize,
         outputBinCount: Int = AudioAnalyzer.defaultOutputBinCount,
-        targetFPS: Int = 60
+        spectrumStore: SpectrumStore? = nil
     ) {
         let resolvedFFTSize = max(1024, fftSize.nonzeroPowerOfTwo)
         let resolvedHopSize = max(128, min(hopSize, resolvedFFTSize / 2))
-        let resolvedOutputBins = max(16, min(outputBinCount, resolvedFFTSize / 2))
+        let resolvedOutputBins = max(64, min(outputBinCount, resolvedFFTSize / 2))
 
         self.fftSize = resolvedFFTSize
         self.hopSize = resolvedHopSize
-        self.outputBinCount = resolvedOutputBins
-        self.publishInterval = 1.0 / CFTimeInterval(max(1, targetFPS))
+        self.spectrumStore = spectrumStore ?? SpectrumStore(binCount: resolvedOutputBins)
         self.log2n = vDSP_Length(log2(Double(resolvedFFTSize)))
         self.binRanges = AudioAnalyzer.makeLogBinRanges(
             fftBinCount: resolvedFFTSize / 2,
             outputBinCount: resolvedOutputBins
         )
+
         self.window = [Float](repeating: 0, count: resolvedFFTSize)
         self.ringBuffer = [Float](repeating: 0, count: resolvedFFTSize)
         self.fftInput = [Float](repeating: 0, count: resolvedFFTSize)
         self.splitReal = [Float](repeating: 0, count: resolvedFFTSize / 2)
         self.splitImag = [Float](repeating: 0, count: resolvedFFTSize / 2)
         self.magnitudes = [Float](repeating: 0, count: resolvedFFTSize / 2)
-        self.thresholdedMagnitudes = [Float](repeating: 0, count: resolvedFFTSize / 2)
         self.decibels = [Float](repeating: 0, count: resolvedFFTSize / 2)
         self.collapsedBins = [Float](repeating: 0, count: resolvedOutputBins)
         self.smoothedBins = [Float](repeating: 0, count: resolvedOutputBins)
-        self.spectrum = [Float](repeating: 0, count: resolvedOutputBins)
-        self.latestFrameStorage = AnalysisFrame(
-            spectrum: [Float](repeating: 0, count: resolvedOutputBins),
-            energy: 0
-        )
 
         vDSP_hann_window(&window, vDSP_Length(resolvedFFTSize), Int32(vDSP_HANN_NORM))
         fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2))
@@ -110,54 +104,57 @@ final class AudioAnalyzer: ObservableObject {
     func reset() {
         analysisQueue.async { [weak self] in
             guard let self else { return }
-            self.ringBuffer = [Float](repeating: 0, count: self.fftSize)
-            self.fftInput = [Float](repeating: 0, count: self.fftSize)
-            self.collapsedBins = [Float](repeating: 0, count: self.outputBinCount)
-            self.smoothedBins = [Float](repeating: 0, count: self.outputBinCount)
+            self.ringBuffer.withUnsafeMutableBufferPointer { pointer in
+                pointer.baseAddress?.update(repeating: 0, count: pointer.count)
+            }
+            self.fftInput.withUnsafeMutableBufferPointer { pointer in
+                pointer.baseAddress?.update(repeating: 0, count: pointer.count)
+            }
+            self.collapsedBins.withUnsafeMutableBufferPointer { pointer in
+                pointer.baseAddress?.update(repeating: 0, count: pointer.count)
+            }
+            self.smoothedBins.withUnsafeMutableBufferPointer { pointer in
+                pointer.baseAddress?.update(repeating: 0, count: pointer.count)
+            }
             self.sampleCursor = 0
             self.hopSampleCounter = 0
-            self.lastPublishTime = 0
-            self.storeLatestFrame(AnalysisFrame(spectrum: self.smoothedBins, energy: 0))
-
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.spectrum = self.smoothedBins
-                self.energy = 0
-            }
+            self.smoothedEnergy = 0
+            self.lastSmoothingTimestamp = 0
+            self.spectrumStore.reset()
         }
     }
 
-    func latestFrame() -> AnalysisFrame {
-        outputLock.lock()
-        let frame = latestFrameStorage
-        outputLock.unlock()
-        return frame
+    func latestEnergy() -> Float {
+        spectrumStore.latestEnergy()
     }
 
     private func analyze(buffer: AVAudioPCMBuffer) {
-        analysisQueue.async { [weak self] in
-            self?.ingest(buffer: buffer)
-        }
-    }
-
-    private func ingest(buffer: AVAudioPCMBuffer) {
-        guard let fftSetup,
-              let channelData = buffer.floatChannelData else {
-            return
-        }
+        guard let channelData = buffer.floatChannelData else { return }
 
         let channelCount = Int(buffer.format.channelCount)
         let frameLength = Int(buffer.frameLength)
         guard channelCount > 0, frameLength > 0 else { return }
 
+        // Copy/mix samples quickly from the tap callback, then process on the analysis queue.
+        var monoSamples = [Float](repeating: 0, count: frameLength)
         for frame in 0..<frameLength {
-            var monoSample: Float = 0
+            var mixed: Float = 0
             for channel in 0..<channelCount {
-                monoSample += channelData[channel][frame]
+                mixed += channelData[channel][frame]
             }
-            monoSample /= Float(channelCount)
+            monoSamples[frame] = mixed / Float(channelCount)
+        }
 
-            ringBuffer[sampleCursor] = monoSample
+        analysisQueue.async { [weak self] in
+            self?.ingest(samples: monoSamples)
+        }
+    }
+
+    private func ingest(samples: [Float]) {
+        guard let fftSetup else { return }
+
+        for sample in samples {
+            ringBuffer[sampleCursor] = sample
             sampleCursor = (sampleCursor + 1) % fftSize
             hopSampleCounter += 1
 
@@ -169,27 +166,28 @@ final class AudioAnalyzer: ObservableObject {
     }
 
     private func processCurrentWindow(fftSetup: FFTSetup) {
+        let deltaTime = nextDeltaTime()
+
         copyRingBufferIntoFFTInput()
         applyWindow()
         performFFT(fftSetup: fftSetup)
         collapseFFTToDisplayBins()
-        smoothSpectrum()
+        smoothSpectrum(deltaTime: deltaTime)
 
-        let frame = AnalysisFrame(
-            spectrum: smoothedBins,
-            energy: computeEnergy(from: smoothedBins)
-        )
-        storeLatestFrame(frame)
+        let energy = updateEnergy(deltaTime: deltaTime)
+        spectrumStore.write(spectrum: smoothedBins, energy: energy)
+    }
 
+    private func nextDeltaTime() -> Float {
         let now = CACurrentMediaTime()
-        guard (now - lastPublishTime) >= publishInterval else { return }
-        lastPublishTime = now
+        defer { lastSmoothingTimestamp = now }
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.spectrum = frame.spectrum
-            self.energy = frame.energy
+        guard lastSmoothingTimestamp > 0 else {
+            return Float(hopSize) / 48_000
         }
+
+        let rawDelta = now - lastSmoothingTimestamp
+        return max(1 / 240, min(Float(rawDelta), 0.25))
     }
 
     private func copyRingBufferIntoFFTInput() {
@@ -199,8 +197,12 @@ final class AudioAnalyzer: ObservableObject {
         }
 
         let tailCount = fftSize - sampleCursor
-        fftInput[0..<tailCount] = ringBuffer[sampleCursor..<fftSize]
-        fftInput[tailCount..<fftSize] = ringBuffer[0..<sampleCursor]
+        for index in 0..<tailCount {
+            fftInput[index] = ringBuffer[sampleCursor + index]
+        }
+        for index in 0..<sampleCursor {
+            fftInput[tailCount + index] = ringBuffer[index]
+        }
     }
 
     private func applyWindow() {
@@ -234,65 +236,84 @@ final class AudioAnalyzer: ObservableObject {
     }
 
     private func collapseFFTToDisplayBins() {
-        var floorMagnitude: Float = 1e-7
-        let binCount = vDSP_Length(magnitudes.count)
-
-        thresholdedMagnitudes = magnitudes
-        thresholdedMagnitudes.withUnsafeBufferPointer { source in
-            decibels.withUnsafeMutableBufferPointer { destination in
-                guard let sourceBase = source.baseAddress,
-                      let destinationBase = destination.baseAddress else {
-                    return
-                }
-                vDSP_vthr(sourceBase, 1, &floorMagnitude, destinationBase, 1, binCount)
-            }
+        let dbFloor: Float = 1e-7
+        for index in magnitudes.indices {
+            let clampedMagnitude = max(magnitudes[index], dbFloor)
+            let decibel = 20 * log10(clampedMagnitude)
+            decibels[index] = min(max(decibel, minDecibels), maxDecibels)
         }
 
-        var reference: Float = 1
-        decibels.withUnsafeBufferPointer { source in
-            thresholdedMagnitudes.withUnsafeMutableBufferPointer { destination in
-                guard let sourceBase = source.baseAddress,
-                      let destinationBase = destination.baseAddress else {
-                    return
-                }
-                vDSP_vdbcon(sourceBase, 1, &reference, destinationBase, 1, binCount, 0)
-            }
-        }
-
+        let decibelRange = maxDecibels - minDecibels
         for (index, range) in binRanges.enumerated() {
             guard !range.isEmpty else {
                 collapsedBins[index] = 0
                 continue
             }
 
-            let sum = range.reduce(Float.zero) { partialResult, binIndex in
-                partialResult + thresholdedMagnitudes[binIndex]
+            var sum: Float = 0
+            var peak = minDecibels
+            for binIndex in range {
+                let value = decibels[binIndex]
+                sum += value
+                peak = max(peak, value)
             }
-            let averageDB = sum / Float(range.count)
-            let normalized = max(0, min((averageDB + 84) / 72, 1))
-            collapsedBins[index] = normalized
+
+            let average = sum / Float(range.count)
+            let weightedDB = (peak * 0.68) + (average * 0.32)
+            let normalized = max(0, min((weightedDB - minDecibels) / decibelRange, 1))
+            let shaped = pow(normalized, mappingGamma)
+            collapsedBins[index] = max(0, min(shaped * mappingGain, 1))
         }
     }
 
-    private func smoothSpectrum() {
-        for index in 0..<collapsedBins.count {
+    private func smoothSpectrum(deltaTime: Float) {
+        let attackCoefficient = smoothingCoefficient(timeConstant: attackTime, deltaTime: deltaTime)
+        let releaseCoefficient = smoothingCoefficient(timeConstant: releaseTime, deltaTime: deltaTime)
+
+        for index in collapsedBins.indices {
             let target = collapsedBins[index]
             let current = smoothedBins[index]
-            let coefficient: Float = target > current ? 0.44 : 0.14
+            let coefficient = target > current ? attackCoefficient : releaseCoefficient
             smoothedBins[index] = current + ((target - current) * coefficient)
         }
     }
 
-    private func computeEnergy(from spectrum: [Float]) -> Float {
-        guard !spectrum.isEmpty else { return 0 }
-        let mean = spectrum.reduce(Float.zero, +) / Float(spectrum.count)
-        return max(0, min(pow(mean, 0.85), 1))
+    private func updateEnergy(deltaTime: Float) -> Float {
+        guard !smoothedBins.isEmpty else {
+            smoothedEnergy = 0
+            return 0
+        }
+
+        var weightedMean: Float = 0
+        var weightedSquare: Float = 0
+        let count = Float(smoothedBins.count)
+
+        for (index, value) in smoothedBins.enumerated() {
+            let t = Float(index) / Float(max(smoothedBins.count - 1, 1))
+            let emphasis = 1.08 - (0.42 * t)
+            let weighted = value * emphasis
+            weightedMean += weighted
+            weightedSquare += weighted * weighted
+        }
+
+        weightedMean /= count
+        weightedSquare /= count
+
+        let rms = sqrt(weightedSquare)
+        let target = max(0, min(((weightedMean * 0.35) + (rms * 0.65)) * 1.24, 1))
+
+        let attackCoefficient = smoothingCoefficient(timeConstant: energyAttackTime, deltaTime: deltaTime)
+        let releaseCoefficient = smoothingCoefficient(timeConstant: energyReleaseTime, deltaTime: deltaTime)
+        let coefficient = target > smoothedEnergy ? attackCoefficient : releaseCoefficient
+        smoothedEnergy += (target - smoothedEnergy) * coefficient
+
+        return max(0, min(smoothedEnergy, 1))
     }
 
-    private func storeLatestFrame(_ frame: AnalysisFrame) {
-        outputLock.lock()
-        latestFrameStorage = frame
-        outputLock.unlock()
+    private func smoothingCoefficient(timeConstant: Float, deltaTime: Float) -> Float {
+        let resolvedTime = max(0.001, timeConstant)
+        let resolvedDelta = max(1 / 240, min(deltaTime, 0.25))
+        return 1 - exp(-resolvedDelta / resolvedTime)
     }
 
     private static func makeLogBinRanges(fftBinCount: Int, outputBinCount: Int) -> [Range<Int>] {
