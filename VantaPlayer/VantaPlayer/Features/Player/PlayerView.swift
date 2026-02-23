@@ -3,6 +3,7 @@ import SwiftUI
 
 struct PlayerView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.chromeInsets) private var chromeInsets
 
     @ObservedObject var viewModel: PlayerViewModel
     @Binding var isPlaylistVisible: Bool
@@ -49,44 +50,54 @@ struct PlayerView: View {
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            NowPlayingHeaderView(
-                currentTrack: viewModel.currentTrack,
-                isPlaying: viewModel.isPlaying,
-                playbackDuration: viewModel.playbackDuration,
-                isImporting: viewModel.isImporting
-            )
-            .accessibilitySortPriority(4)
-
-            if let inlineError = viewModel.inlineError {
-                InlineErrorBanner(
-                    message: inlineError.message,
-                    showRemoveAction: inlineError.trackID != nil,
-                    onRemove: {
-                        if let trackID = inlineError.trackID {
-                            viewModel.removeTrack(id: trackID)
-                        }
-                    },
-                    onDismiss: viewModel.dismissInlineError
-                )
-                .transition(sectionTransition)
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                Color.clear.frame(width: chromeInsets.leading, height: 1)
+                Spacer(minLength: 0)
             }
+            .frame(height: chromeInsets.top)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
 
-            middleSection
-                .accessibilitySortPriority(3)
-
-            if isInspectorVisible {
-                InlineInspectorView(
+            VStack(spacing: 12) {
+                NowPlayingHeaderView(
                     currentTrack: viewModel.currentTrack,
-                    trackCount: viewModel.tracks.count,
-                    revealInFinder: revealInFinder
+                    isPlaying: viewModel.isPlaying,
+                    playbackDuration: viewModel.playbackDuration,
+                    isImporting: viewModel.isImporting
                 )
-                .transition(sectionTransition)
-                .accessibilitySortPriority(2)
-            }
+                .accessibilitySortPriority(4)
 
-            transportStrip
-                .accessibilitySortPriority(1)
+                if let inlineError = viewModel.inlineError {
+                    InlineErrorBanner(
+                        message: inlineError.message,
+                        showRemoveAction: inlineError.trackID != nil,
+                        onRemove: {
+                            if let trackID = inlineError.trackID {
+                                viewModel.removeTrack(id: trackID)
+                            }
+                        },
+                        onDismiss: viewModel.dismissInlineError
+                    )
+                    .transition(sectionTransition)
+                }
+
+                middleSection
+                    .accessibilitySortPriority(3)
+
+                if isInspectorVisible {
+                    InlineInspectorView(
+                        currentTrack: viewModel.currentTrack,
+                        trackCount: viewModel.tracks.count,
+                        revealInFinder: revealInFinder
+                    )
+                    .transition(sectionTransition)
+                    .accessibilitySortPriority(2)
+                }
+
+                transportStrip
+                    .accessibilitySortPriority(1)
+            }
         }
         .padding(14)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -134,6 +145,7 @@ struct PlayerView: View {
                 .accessibilityHint("Show or hide the inspector section")
             }
         }
+        .toolbarBackground(.hidden, for: .windowToolbar)
         .background(
             KeyboardEventMonitor { event in
                 viewModel.handleKeyDown(event)

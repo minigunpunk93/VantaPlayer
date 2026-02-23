@@ -1,10 +1,13 @@
 import AppKit
+import Combine
 import Foundation
 
 @MainActor
-final class WindowCoordinator: NSObject {
+final class WindowCoordinator: NSObject, ObservableObject {
     private let normalMinSize = NSSize(width: 820, height: 520)
     private let unconstrainedSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+
+    @Published private(set) var chromeInsets = ChromeInsets.fallback
 
     private weak var window: NSWindow?
     private weak var proxiedDelegate: NSWindowDelegate?
@@ -23,6 +26,7 @@ final class WindowCoordinator: NSObject {
         self.window = window
         proxiedDelegate = (window.delegate === self) ? nil : window.delegate
         window.delegate = self
+        refreshChromeInsets(for: window)
 
         DispatchQueue.main.async { [weak self] in
             self?.applyCurrentWindowMode(setContentSize: true)
@@ -36,6 +40,7 @@ final class WindowCoordinator: NSObject {
 
     private func applyCurrentWindowMode(setContentSize: Bool) {
         guard let window else { return }
+        refreshChromeInsets(for: window)
 
         if window.styleMask.contains(.fullScreen) {
             relaxResizeLimitsForFullscreen(on: window)
@@ -93,6 +98,13 @@ final class WindowCoordinator: NSObject {
 
         return NSSize(width: floor(targetWidth), height: floor(targetHeight))
     }
+
+    private func refreshChromeInsets(for window: NSWindow) {
+        let nextInsets = WindowChromeConfigurator.shared.configureIfNeeded(window)
+        if chromeInsets != nextInsets {
+            chromeInsets = nextInsets
+        }
+    }
 }
 
 extension WindowCoordinator: NSWindowDelegate {
@@ -106,7 +118,9 @@ extension WindowCoordinator: NSWindowDelegate {
 
     nonisolated func windowDidEnterFullScreen(_ notification: Notification) {
         MainActor.assumeIsolated { [weak self] in
-            self?.proxiedDelegate?.windowDidEnterFullScreen?(notification)
+            guard let self, let window = self.window else { return }
+            self.refreshChromeInsets(for: window)
+            self.proxiedDelegate?.windowDidEnterFullScreen?(notification)
         }
     }
 
@@ -123,6 +137,14 @@ extension WindowCoordinator: NSWindowDelegate {
             guard let self else { return }
             self.applyCurrentWindowMode(setContentSize: true)
             self.proxiedDelegate?.windowDidExitFullScreen?(notification)
+        }
+    }
+
+    nonisolated func windowDidResize(_ notification: Notification) {
+        MainActor.assumeIsolated { [weak self] in
+            guard let self, let window = self.window else { return }
+            self.refreshChromeInsets(for: window)
+            self.proxiedDelegate?.windowDidResize?(notification)
         }
     }
 

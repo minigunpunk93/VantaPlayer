@@ -14,8 +14,10 @@ struct VantaPlayerApp: App {
                 isInspectorVisible: $isInspectorVisible
             )
             .frame(minWidth: 520, minHeight: 420)
+            .installWindowChrome()
         }
         .defaultSize(width: 700, height: 760)
+        .windowToolbarStyle(.unifiedCompact)
         .commands {
             ViewCommands(
                 isPlaylistVisible: $isPlaylistVisible,
