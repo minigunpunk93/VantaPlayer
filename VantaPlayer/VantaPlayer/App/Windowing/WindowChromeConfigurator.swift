@@ -87,6 +87,7 @@ final class WindowChromeConfigurator {
 }
 
 private struct WindowChromeInstaller: ViewModifier {
+    @AppStorage(AppStorageKeys.isCompactMode) private var isCompactMode = false
     @StateObject private var windowCoordinator = WindowCoordinator()
 
     func body(content: Content) -> some View {
@@ -95,8 +96,12 @@ private struct WindowChromeInstaller: ViewModifier {
             .background {
                 WindowAccessor { window in
                     windowCoordinator.attach(window: window)
+                    windowCoordinator.setCompactModeEnabled(isCompactMode)
                 }
                 .frame(width: 0, height: 0)
+            }
+            .onChange(of: isCompactMode) { _, newValue in
+                windowCoordinator.setCompactModeEnabled(newValue)
             }
     }
 }

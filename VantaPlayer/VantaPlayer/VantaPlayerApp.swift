@@ -7,8 +7,7 @@ struct VantaPlayerApp: App {
     var body: some Scene {
         WindowGroup {
             PlayerView(viewModel: playerViewModel)
-            .frame(minWidth: 520, minHeight: 420)
-            .installWindowChrome()
+                .installWindowChrome()
         }
         .defaultSize(width: 700, height: 760)
         .windowToolbarStyle(.unifiedCompact)

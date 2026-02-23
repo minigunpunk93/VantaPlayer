@@ -70,13 +70,22 @@ struct PlayerView: View {
         reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98, anchor: .top))
     }
 
+    private var chromeTopSpacerHeight: CGFloat {
+        guard isCompactMode else { return chromeInsets.top }
+        return min(max(chromeInsets.top, 8), 18)
+    }
+
+    private var rootTopPadding: CGFloat {
+        isCompactMode ? 4 : density.contentPadding
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 Color.clear.frame(width: chromeInsets.leading, height: 1)
                 Spacer(minLength: 0)
             }
-            .frame(height: chromeInsets.top)
+            .frame(height: chromeTopSpacerHeight)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
 
@@ -97,7 +106,9 @@ struct PlayerView: View {
                 )
             }
         }
-        .padding(density.contentPadding)
+        .padding(.horizontal, density.contentPadding)
+        .padding(.bottom, density.contentPadding)
+        .padding(.top, rootTopPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .dropDestination(for: URL.self) { droppedURLs, _ in
             viewModel.importTracks(from: droppedURLs)
@@ -108,7 +119,6 @@ struct PlayerView: View {
         .animation(sectionAnimation, value: isPlaylistVisible)
         .animation(sectionAnimation, value: isInspectorVisible)
         .animation(sectionAnimation, value: viewModel.inlineError != nil)
-        .animation(sectionAnimation, value: isCompactMode)
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
                 if !isCompactMode {
@@ -458,38 +468,22 @@ struct PlayerView: View {
     private func handleCompactModeChange(from oldValue: Bool, to newValue: Bool) {
         guard oldValue != newValue else { return }
 
-        let updates = {
-            if newValue {
-                sectionVisibilityBeforeCompact = SectionVisibilitySnapshot(
-                    playlistVisible: isPlaylistVisible,
-                    inspectorVisible: isInspectorVisible
-                )
-                isPlaylistVisible = false
-                isInspectorVisible = false
-            } else if let snapshot = sectionVisibilityBeforeCompact {
-                isPlaylistVisible = snapshot.playlistVisible
-                isInspectorVisible = snapshot.inspectorVisible
-                sectionVisibilityBeforeCompact = nil
-            }
-        }
-
-        if reduceMotion {
-            updates()
-        } else {
-            withAnimation(.easeInOut(duration: 0.18)) {
-                updates()
-            }
+        if newValue {
+            sectionVisibilityBeforeCompact = SectionVisibilitySnapshot(
+                playlistVisible: isPlaylistVisible,
+                inspectorVisible: isInspectorVisible
+            )
+            isPlaylistVisible = false
+            isInspectorVisible = false
+        } else if let snapshot = sectionVisibilityBeforeCompact {
+            isPlaylistVisible = snapshot.playlistVisible
+            isInspectorVisible = snapshot.inspectorVisible
+            sectionVisibilityBeforeCompact = nil
         }
     }
 
     private func toggleCompactMode() {
-        if reduceMotion {
-            isCompactMode.toggle()
-        } else {
-            withAnimation(.easeInOut(duration: 0.18)) {
-                isCompactMode.toggle()
-            }
-        }
+        isCompactMode.toggle()
     }
 
     private func togglePlaylistVisibility() {
