@@ -281,15 +281,10 @@ struct PlayerView: View {
                 .background(Color.clear)
             }
         }
-        .background(
-            RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous)
-                .fill(.regularMaterial)
+        .vantaCard(
+            cornerRadius: density.cardCornerRadius,
+            borderColor: dropTargetActive ? Color.accentColor.opacity(0.7) : Color.white.opacity(0.08)
         )
-        .overlay(
-            RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous)
-                .strokeBorder(dropTargetActive ? Color.accentColor.opacity(0.7) : Color.white.opacity(0.08), lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous))
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Playlist")
     }
@@ -352,7 +347,8 @@ struct PlayerView: View {
             }
 
             Text(timeString(scrubPosition))
-                .font(.caption.monospacedDigit())
+                .font(.caption)
+                .monospacedDigit()
                 .foregroundStyle(.secondary)
                 .frame(width: density.transportTimeWidth, alignment: .trailing)
 
@@ -371,7 +367,8 @@ struct PlayerView: View {
             .disabled(!viewModel.hasTracks)
 
             Text(timeString(viewModel.playbackDuration))
-                .font(.caption.monospacedDigit())
+                .font(.caption)
+                .monospacedDigit()
                 .foregroundStyle(.secondary)
                 .frame(width: density.transportTimeWidth, alignment: .leading)
 
@@ -397,11 +394,7 @@ struct PlayerView: View {
         .controlSize(density.controlSize)
         .padding(.horizontal, density.transportHorizontalPadding)
         .padding(.vertical, density.transportVerticalPadding)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
-        )
+        .vantaCard(cornerRadius: density.cardCornerRadius)
         .accessibilityElement(children: .contain)
     }
 

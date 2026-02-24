@@ -44,6 +44,7 @@ struct NowPlayingHeaderView: View {
 
             Text(statusText)
                 .font(.caption.weight(.semibold))
+                .monospacedDigit()
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
@@ -51,11 +52,7 @@ struct NowPlayingHeaderView: View {
         }
         .padding(.horizontal, density.headerHorizontalPadding)
         .padding(.vertical, density.headerVerticalPadding)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
-        )
+        .vantaCard(cornerRadius: density.cardCornerRadius)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)
     }

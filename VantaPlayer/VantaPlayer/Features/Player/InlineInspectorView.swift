@@ -43,11 +43,7 @@ struct InlineInspectorView: View {
             InspectorRow(label: "Track Count", value: "\(trackCount)", densityMode: densityMode)
         }
         .padding(density.inspectorPadding)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
-        )
+        .vantaCard(cornerRadius: density.cardCornerRadius)
         .controlSize(density.controlSize)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Inspector")
