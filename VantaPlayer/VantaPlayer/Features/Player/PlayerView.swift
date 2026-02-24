@@ -146,7 +146,7 @@ struct PlayerView: View {
                 Button {
                     toggleCompactMode()
                 } label: {
-                    Image(systemName: isCompactMode ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                    Image(systemName: isCompactMode ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left")
                 }
                 .help("Toggle compact mode (⌃⌘C)")
                 .accessibilityLabel("Toggle compact mode")
@@ -379,17 +379,6 @@ struct PlayerView: View {
                 .frame(width: density.volumeSliderWidth)
                 .help("Volume")
                 .accessibilityLabel("Volume")
-
-            if isCompact {
-                Button {
-                    toggleCompactMode()
-                } label: {
-                    Image(systemName: "arrow.up.left.and.arrow.down.right")
-                }
-                .buttonStyle(.plain)
-                .help("Exit compact mode")
-                .accessibilityLabel("Exit compact mode")
-            }
         }
         .controlSize(density.controlSize)
         .padding(.horizontal, density.transportHorizontalPadding)

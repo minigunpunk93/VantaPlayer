@@ -98,6 +98,8 @@ final class WindowChromeConfigurator {
 
 private struct WindowChromeInstaller: ViewModifier {
     @AppStorage(AppStorageKeys.isCompactMode) private var isCompactMode = false
+    @AppStorage(AppStorageKeys.isPlaylistVisible) private var isPlaylistVisible = true
+    @AppStorage(AppStorageKeys.isInspectorVisible) private var isInspectorVisible = true
     @StateObject private var windowCoordinator = WindowCoordinator()
 
     func body(content: Content) -> some View {
@@ -107,11 +109,27 @@ private struct WindowChromeInstaller: ViewModifier {
                 WindowAccessor { window in
                     windowCoordinator.attach(window: window)
                     windowCoordinator.setCompactModeEnabled(isCompactMode)
+                    windowCoordinator.setSectionVisibility(
+                        playlistVisible: isPlaylistVisible,
+                        inspectorVisible: isInspectorVisible
+                    )
                 }
                 .frame(width: 0, height: 0)
             }
             .onChange(of: isCompactMode) { _, newValue in
                 windowCoordinator.setCompactModeEnabled(newValue)
+            }
+            .onChange(of: isPlaylistVisible) { _, newValue in
+                windowCoordinator.setSectionVisibility(
+                    playlistVisible: newValue,
+                    inspectorVisible: isInspectorVisible
+                )
+            }
+            .onChange(of: isInspectorVisible) { _, newValue in
+                windowCoordinator.setSectionVisibility(
+                    playlistVisible: isPlaylistVisible,
+                    inspectorVisible: newValue
+                )
             }
     }
 }

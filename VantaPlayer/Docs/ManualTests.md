@@ -7,9 +7,14 @@
 
 ## Compact Mode Width Match
 - [ ] Toggle compact mode (`Control` + `Command` + `C`).
+- [ ] Compact toggle feels instant (no visible delay before resize).
 - [ ] Verify compact mode keeps the exact same window width as normal mode.
 - [ ] Verify only window height changes when entering compact mode.
 - [ ] Toggle back to normal mode and verify top edge remains visually stable (no jittering/multi-step resize).
+- [ ] In compact mode, verify there is no duplicate expand/compact button near the volume slider.
+- [ ] Verify compact toolbar icon reflects action:
+- [ ] Compact ON shows expand-outward icon.
+- [ ] Compact OFF shows shrink-inward icon.
 
 ## Stealth Stoplights and Chrome Insets
 - [ ] In normal mode, confirm the close stoplight button is visible.
@@ -31,3 +36,8 @@
 - [ ] Verify card visuals are consistent across header, playlist, inspector, queue picker, and transport strip.
 - [ ] Verify no clipping in both normal and compact windows at the current fixed sizes.
 - [ ] Verify time digits remain visually stable while values change.
+
+## Normal Preset Shrink (A1-S)
+- [ ] In normal mode, hide playlist and verify window height shrinks to remove large empty space.
+- [ ] In normal mode, hide inspector and verify window height shrinks to remove large empty space.
+- [ ] In normal mode, hide both playlist and inspector and verify app auto-switches to compact mode.
