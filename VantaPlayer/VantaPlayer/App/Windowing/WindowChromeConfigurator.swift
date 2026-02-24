@@ -5,7 +5,7 @@ struct ChromeInsets: Equatable {
     var top: CGFloat
     var leading: CGFloat
 
-    static let fallback = ChromeInsets(top: 12, leading: 76)
+    static let fallback = ChromeInsets(top: 12, leading: 14)
     static let fullScreen = ChromeInsets(top: 8, leading: 12)
 }
 
@@ -40,9 +40,18 @@ final class WindowChromeConfigurator {
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
         window.isMovableByWindowBackground = true
+        if let closeButton = window.standardWindowButton(.closeButton) {
+            closeButton.isHidden = false
+            closeButton.target = NSApp
+            closeButton.action = #selector(NSApplication.terminate(_:))
+            closeButton.toolTip = "Quit VantaPlayer"
+        }
+        window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        window.standardWindowButton(.zoomButton)?.isHidden = true
 
         if #available(macOS 11.0, *) {
             window.toolbarStyle = .unifiedCompact
+            window.titlebarSeparatorStyle = .none
         }
     }
 
@@ -56,9 +65,10 @@ final class WindowChromeConfigurator {
             return insets
         }
 
-        let buttonTypes: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
+        let buttonTypes: [NSWindow.ButtonType] = [.miniaturizeButton, .zoomButton]
         let buttonFrames = buttonTypes.compactMap { type -> CGRect? in
-            guard let button = window.standardWindowButton(type) else {
+            guard let button = window.standardWindowButton(type),
+                  !button.isHidden else {
                 return nil
             }
 

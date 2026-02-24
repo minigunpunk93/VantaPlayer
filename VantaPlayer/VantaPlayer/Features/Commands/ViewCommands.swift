@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct ViewCommands: Commands {
@@ -42,6 +43,33 @@ struct ViewCommands: Commands {
                 ForEach(DensityMode.allCases) { mode in
                     Text(mode.title).tag(mode)
                 }
+            }
+        }
+
+        CommandGroup(replacing: .windowArrangement) {
+            Button("Close Window") {
+                NSApp.keyWindow?.performClose(nil)
+            }
+            .keyboardShortcut("w", modifiers: [.command])
+
+            Button("Minimize") {
+                NSApp.keyWindow?.miniaturize(nil)
+            }
+            .keyboardShortcut("m", modifiers: [.command])
+
+            Button("Zoom") {
+                NSApp.keyWindow?.zoom(nil)
+            }
+
+            Button("Enter/Exit Full Screen") {
+                NSApp.keyWindow?.toggleFullScreen(nil)
+            }
+            .keyboardShortcut("f", modifiers: [.control, .command])
+
+            Divider()
+
+            Button("Bring All to Front") {
+                NSApp.arrangeInFront(nil)
             }
         }
     }

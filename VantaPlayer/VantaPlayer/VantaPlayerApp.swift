@@ -9,7 +9,7 @@ struct VantaPlayerApp: App {
             PlayerView(viewModel: playerViewModel)
                 .installWindowChrome()
         }
-        .defaultSize(width: 700, height: 760)
+        .defaultSize(width: 520, height: 560)
         .windowToolbarStyle(.unifiedCompact)
         .commands {
             ViewCommands()

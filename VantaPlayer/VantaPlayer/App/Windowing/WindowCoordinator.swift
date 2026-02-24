@@ -4,15 +4,16 @@ import Foundation
 
 @MainActor
 final class WindowCoordinator: NSObject, ObservableObject {
-    private let normalMinSize = NSSize(width: 520, height: 420)
+    private let normalContentSize = NSSize(width: 520, height: 560)
+    private let compactContentHeight: CGFloat = 140
+    private var compactContentWidth: CGFloat { normalContentSize.width }
+
     private let fullscreenMinSize = NSSize(width: 240, height: 160)
+    private let transitionMinSize = NSSize(width: 1, height: 1)
     private let unconstrainedSize = NSSize(
         width: CGFloat.greatestFiniteMagnitude,
         height: CGFloat.greatestFiniteMagnitude
     )
-    private let compactContentHeight: CGFloat = 140
-    private let fallbackCompactContentWidth: CGFloat = 420
-    private let compactFrameHeightValidationThreshold: CGFloat = 64
     private let frameApplyThreshold: CGFloat = 1.0
 
     @Published private(set) var chromeInsets = ChromeInsets.fallback
@@ -21,9 +22,7 @@ final class WindowCoordinator: NSObject, ObservableObject {
     private weak var proxiedDelegate: NSWindowDelegate?
 
     private var isCompactModeEnabled = false
-    private var lastNormalFrame: NSRect?
     private var isApplyingWindowMode = false
-    private var pendingPostToggleReconcile: DispatchWorkItem?
 
     func attach(window: NSWindow) {
         guard self.window !== window else { return }
@@ -46,11 +45,7 @@ final class WindowCoordinator: NSObject, ObservableObject {
     func setCompactModeEnabled(_ enabled: Bool) {
         guard isCompactModeEnabled != enabled else { return }
         isCompactModeEnabled = enabled
-        if enabled, let window {
-            lastNormalFrame = window.frame
-        }
         applyCurrentWindowMode(setContentSize: true, animateResize: shouldAnimateWindowResize)
-        schedulePostToggleReconcile()
     }
 
     private func applyCurrentWindowMode(setContentSize: Bool, animateResize: Bool) {
@@ -74,56 +69,61 @@ final class WindowCoordinator: NSObject, ObservableObject {
     }
 
     private func applyCompactMode(on window: NSWindow, setContentSize: Bool, animateResize: Bool) {
-        if lastNormalFrame == nil {
-            lastNormalFrame = window.frame
-        }
+        let targetFrameSize = compactTargetFrameSize(for: window)
+        applyFixedMode(
+            on: window,
+            targetFrameSize: targetFrameSize,
+            setContentSize: setContentSize,
+            animateResize: animateResize
+        )
+    }
 
-        let oldFrame = window.frame
-        let targetFrameHeight = min(compactTargetFrameHeight(for: window), oldFrame.height)
-        let compactTargetSize = NSSize(width: oldFrame.width, height: targetFrameHeight)
+    private func applyNormalMode(on window: NSWindow, setContentSize: Bool, animateResize: Bool) {
+        let targetFrameSize = normalTargetFrameSize(for: window)
+        applyFixedMode(
+            on: window,
+            targetFrameSize: targetFrameSize,
+            setContentSize: setContentSize,
+            animateResize: animateResize
+        )
+    }
 
-        // Lock first so compact target is not clamped by normal minSize.
-        applyCompactLock(on: window, targetSize: compactTargetSize)
+    private func applyFixedMode(
+        on window: NSWindow,
+        targetFrameSize: NSSize,
+        setContentSize: Bool,
+        animateResize: Bool
+    ) {
+        relaxResizeLimitsForTransition(on: window)
 
         if setContentSize {
             resizeWindowTopAnchored(
                 window,
-                targetFrameHeight: targetFrameHeight,
+                targetFrameSize: targetFrameSize,
                 animate: animateResize && shouldAnimateWindowResize
             )
         }
+
+        lockWindowSize(on: window, frameSize: targetFrameSize)
     }
 
-    private func applyNormalMode(on window: NSWindow, setContentSize: Bool, animateResize: Bool) {
-        // Unlock first so restore is not clamped by compact lock.
-        applyStandardResizeLimits(on: window)
-
-        if setContentSize {
-            restoreNormalFrame(
-                on: window,
-                animate: animateResize && shouldAnimateWindowResize
-            )
-        }
-        lastNormalFrame = nil
-    }
-
-    private func applyCompactLock(on window: NSWindow, targetSize: NSSize) {
-        if !approximatelyEqual(window.minSize, targetSize) {
-            window.minSize = targetSize
-        }
-
-        if !approximatelyEqual(window.maxSize, targetSize) {
-            window.maxSize = targetSize
-        }
-    }
-
-    private func applyStandardResizeLimits(on window: NSWindow) {
-        if !approximatelyEqual(window.minSize, normalMinSize) {
-            window.minSize = normalMinSize
+    private func relaxResizeLimitsForTransition(on window: NSWindow) {
+        if !approximatelyEqual(window.minSize, transitionMinSize) {
+            window.minSize = transitionMinSize
         }
 
         if !approximatelyEqual(window.maxSize, unconstrainedSize) {
             window.maxSize = unconstrainedSize
+        }
+    }
+
+    private func lockWindowSize(on window: NSWindow, frameSize: NSSize) {
+        if !approximatelyEqual(window.minSize, frameSize) {
+            window.minSize = frameSize
+        }
+
+        if !approximatelyEqual(window.maxSize, frameSize) {
+            window.maxSize = frameSize
         }
     }
 
@@ -132,74 +132,46 @@ final class WindowCoordinator: NSObject, ObservableObject {
         window.maxSize = unconstrainedSize
     }
 
-    private func compactTargetFrameHeight(for window: NSWindow) -> CGFloat {
+    private func normalTargetFrameSize(for window: NSWindow) -> NSSize {
+        targetFrameSize(for: window, contentSize: normalContentSize)
+    }
+
+    private func compactTargetFrameSize(for window: NSWindow) -> NSSize {
+        targetFrameSize(
+            for: window,
+            contentSize: NSSize(width: compactContentWidth, height: compactContentHeight)
+        )
+    }
+
+    private func targetFrameSize(for window: NSWindow, contentSize: NSSize) -> NSSize {
+        let targetContentRect = NSRect(origin: .zero, size: contentSize)
+        let targetFrameRect = window.frameRect(forContentRect: targetContentRect)
+
+        if targetFrameRect.width.isFinite,
+           targetFrameRect.width > 0,
+           targetFrameRect.height.isFinite,
+           targetFrameRect.height > 0 {
+            return NSSize(width: floor(targetFrameRect.width), height: floor(targetFrameRect.height))
+        }
+
         let currentFrame = window.frame
         let currentContentRect = window.contentRect(forFrameRect: currentFrame)
-        let targetContentWidth: CGFloat
-        if currentContentRect.width.isFinite, currentContentRect.width > 0 {
-            targetContentWidth = currentContentRect.width
-        } else {
-            targetContentWidth = fallbackCompactContentWidth
-        }
+        let chromeWidth = max(0, currentFrame.width - currentContentRect.width)
+        let chromeHeight = max(0, currentFrame.height - currentContentRect.height)
 
-        let targetContentRect = NSRect(
-            x: 0,
-            y: 0,
-            width: targetContentWidth,
-            height: compactContentHeight
+        return NSSize(
+            width: floor(contentSize.width + chromeWidth),
+            height: floor(contentSize.height + chromeHeight)
         )
-        let targetFrameRect = window.frameRect(forContentRect: targetContentRect)
-        let fallbackFrameHeight = compactContentHeight + max(0, currentFrame.height - currentContentRect.height)
-
-        if targetFrameRect.height.isFinite, targetFrameRect.height > 0 {
-            let computedHeight = floor(targetFrameRect.height)
-            let fallbackHeight = floor(max(fallbackFrameHeight, compactContentHeight))
-
-            // Guard against pathological conversions that occasionally produce oversized frame heights.
-            if abs(computedHeight - fallbackHeight) <= compactFrameHeightValidationThreshold {
-                return computedHeight
-            }
-
-            return fallbackHeight
-        }
-
-        return floor(max(fallbackFrameHeight, compactContentHeight))
     }
 
-    private func schedulePostToggleReconcile() {
-        pendingPostToggleReconcile?.cancel()
-
-        let workItem = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            self.applyCurrentWindowMode(setContentSize: true, animateResize: false)
-        }
-
-        pendingPostToggleReconcile = workItem
-        DispatchQueue.main.async(execute: workItem)
-    }
-
-    private func restoreNormalFrame(on window: NSWindow, animate: Bool) {
-        guard let lastNormalFrame else { return }
-
-        let currentFrame = window.frame
-        let targetFrame = NSRect(
-            x: lastNormalFrame.minX,
-            y: currentFrame.maxY - lastNormalFrame.height,
-            width: lastNormalFrame.width,
-            height: lastNormalFrame.height
-        )
-
-        guard frameDiffersMeaningfully(currentFrame, targetFrame) else { return }
-        window.setFrame(targetFrame, display: true, animate: animate)
-    }
-
-    private func resizeWindowTopAnchored(_ window: NSWindow, targetFrameHeight: CGFloat, animate: Bool) {
+    private func resizeWindowTopAnchored(_ window: NSWindow, targetFrameSize: NSSize, animate: Bool) {
         let oldFrame = window.frame
         let newFrame = NSRect(
             x: oldFrame.minX,
-            y: oldFrame.maxY - targetFrameHeight,
-            width: oldFrame.width,
-            height: targetFrameHeight
+            y: oldFrame.maxY - targetFrameSize.height,
+            width: targetFrameSize.width,
+            height: targetFrameSize.height
         )
 
         guard frameDiffersMeaningfully(oldFrame, newFrame) else { return }
@@ -207,7 +179,9 @@ final class WindowCoordinator: NSObject, ObservableObject {
     }
 
     private func frameDiffersMeaningfully(_ lhs: NSRect, _ rhs: NSRect) -> Bool {
+        abs(lhs.origin.x - rhs.origin.x) >= frameApplyThreshold ||
         abs(lhs.origin.y - rhs.origin.y) >= frameApplyThreshold ||
+        abs(lhs.size.width - rhs.size.width) >= frameApplyThreshold ||
         abs(lhs.size.height - rhs.size.height) >= frameApplyThreshold
     }
 
@@ -270,18 +244,15 @@ extension WindowCoordinator: NSWindowDelegate {
 
     nonisolated func windowDidEndLiveResize(_ notification: Notification) {
         MainActor.assumeIsolated { [weak self] in
-            guard let self, let window = self.window else { return }
-            if !self.isCompactModeEnabled, !window.styleMask.contains(.fullScreen) {
-                self.lastNormalFrame = window.frame
-            }
+            guard let self else { return }
             self.proxiedDelegate?.windowDidEndLiveResize?(notification)
         }
     }
 
     nonisolated func windowDidChangeScreen(_ notification: Notification) {
         MainActor.assumeIsolated { [weak self] in
-            guard let self else { return }
-            if self.isCompactModeEnabled {
+            guard let self, let window = self.window else { return }
+            if !window.styleMask.contains(.fullScreen) {
                 self.applyCurrentWindowMode(setContentSize: true, animateResize: false)
             }
             self.proxiedDelegate?.windowDidChangeScreen?(notification)
