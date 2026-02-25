@@ -218,22 +218,22 @@ struct PlayerView: View {
                 lastNonZeroVolume = normalized
             }
         }
-        .onChange(of: viewModel.selectedTrackID) { _, newValue in
-            guard let newValue else { return }
-            viewModel.playTrack(with: newValue)
-        }
     }
 
     private var transportSideColumnWidth: CGFloat {
         max(108, density.volumeSliderWidth + 24)
     }
 
+    private var transportDisplayTrack: Track? {
+        viewModel.playingTrack ?? viewModel.currentTrack
+    }
+
     private var transportTitleText: String {
-        viewModel.currentTrack?.title ?? "No Track Selected"
+        transportDisplayTrack?.title ?? "No Track Selected"
     }
 
     private var transportArtistText: String? {
-        guard let artist = viewModel.currentTrack?.artist?.trimmingCharacters(in: .whitespacesAndNewlines),
+        guard let artist = transportDisplayTrack?.artist?.trimmingCharacters(in: .whitespacesAndNewlines),
               !artist.isEmpty else {
             return nil
         }
@@ -297,6 +297,10 @@ struct PlayerView: View {
                             Button("Remove") {
                                 viewModel.removeTrack(id: track.id)
                             }
+                        }
+                        .onTapGesture(count: 2) {
+                            viewModel.selectedTrackID = track.id
+                            viewModel.playTrack(with: track.id)
                         }
                         .accessibilityHint(track.isPlayable ? "Play this track" : "Track cannot be played")
                     }
@@ -711,8 +715,6 @@ private struct SeekBar: View {
     let onScrubChanged: (Double) -> Void
     let onScrubEnded: (Double) -> Void
 
-    @State private var isTracking = false
-
     private var normalizedProgress: CGFloat {
         let span = range.upperBound - range.lowerBound
         guard span > 0 else { return 0 }
@@ -734,26 +736,18 @@ private struct SeekBar: View {
             }
             .frame(height: 8)
             .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { gesture in
-                        guard isEnabled else { return }
-                        beginTrackingIfNeeded()
-                        onScrubChanged(resolvedValue(for: gesture.location.x, width: width))
-                    }
-                    .onEnded { gesture in
-                        guard isEnabled else { return }
-                        let finalValue = resolvedValue(for: gesture.location.x, width: width)
-                        beginTrackingIfNeeded()
-                        onScrubChanged(finalValue)
-                        onScrubEnded(finalValue)
-                        isTracking = false
-                    }
-            )
+            .overlay {
+                SeekBarMouseCaptureLayer(
+                    range: range,
+                    isEnabled: isEnabled,
+                    onScrubBegan: onScrubBegan,
+                    onScrubChanged: onScrubChanged,
+                    onScrubEnded: onScrubEnded
+                )
+            }
         }
         .frame(height: 8)
         .opacity(isEnabled ? 1 : 0.55)
-        .allowsHitTesting(isEnabled)
         .accessibilityElement(children: .ignore)
         .accessibilityAdjustableAction { direction in
             guard isEnabled else { return }
@@ -774,15 +768,103 @@ private struct SeekBar: View {
             onScrubEnded(adjustedValue)
         }
     }
+}
 
-    private func beginTrackingIfNeeded() {
-        guard !isTracking else { return }
-        isTracking = true
-        onScrubBegan()
+private struct SeekBarMouseCaptureLayer: NSViewRepresentable {
+    let range: ClosedRange<Double>
+    let isEnabled: Bool
+    let onScrubBegan: () -> Void
+    let onScrubChanged: (Double) -> Void
+    let onScrubEnded: (Double) -> Void
+
+    func makeNSView(context: Context) -> SeekBarMouseCaptureView {
+        let view = SeekBarMouseCaptureView()
+        view.wantsLayer = true
+        view.layer?.backgroundColor = NSColor.clear.cgColor
+        return view
     }
 
-    private func resolvedValue(for locationX: CGFloat, width: CGFloat) -> Double {
-        let ratio = min(max(locationX / width, 0), 1)
+    func updateNSView(_ nsView: SeekBarMouseCaptureView, context: Context) {
+        nsView.range = range
+        nsView.isCaptureEnabled = isEnabled
+        nsView.onScrubBegan = onScrubBegan
+        nsView.onScrubChanged = onScrubChanged
+        nsView.onScrubEnded = onScrubEnded
+    }
+}
+
+private final class SeekBarMouseCaptureView: NSView {
+    var range: ClosedRange<Double> = 0...1
+    var isCaptureEnabled = true
+    var onScrubBegan: (() -> Void)?
+    var onScrubChanged: ((Double) -> Void)?
+    var onScrubEnded: ((Double) -> Void)?
+
+    private var isTrackingSeek = false
+
+    override var mouseDownCanMoveWindow: Bool {
+        false
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard isCaptureEnabled else { return nil }
+        return super.hitTest(point)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isCaptureEnabled else {
+            super.mouseDown(with: event)
+            return
+        }
+
+        isTrackingSeek = true
+        onScrubBegan?()
+        let value = resolvedValue(from: event)
+        onScrubChanged?(value)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard isCaptureEnabled, isTrackingSeek else {
+            super.mouseDragged(with: event)
+            return
+        }
+
+        let value = resolvedValue(from: event)
+        onScrubChanged?(value)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        guard isCaptureEnabled, isTrackingSeek else {
+            super.mouseUp(with: event)
+            return
+        }
+
+        let value = resolvedValue(from: event)
+        onScrubChanged?(value)
+        onScrubEnded?(value)
+        isTrackingSeek = false
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        guard isCaptureEnabled, isTrackingSeek else {
+            super.mouseExited(with: event)
+            return
+        }
+
+        let value = resolvedValue(from: event)
+        onScrubChanged?(value)
+        onScrubEnded?(value)
+        isTrackingSeek = false
+    }
+
+    private func resolvedValue(from event: NSEvent) -> Double {
+        let point = convert(event.locationInWindow, from: nil)
+        let width = max(bounds.width, 1)
+        let ratio = min(max(point.x / width, 0), 1)
         let resolved = range.lowerBound + (range.upperBound - range.lowerBound) * Double(ratio)
         return min(max(resolved, range.lowerBound), range.upperBound)
     }

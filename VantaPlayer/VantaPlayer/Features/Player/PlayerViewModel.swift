@@ -95,6 +95,14 @@ final class PlayerViewModel: ObservableObject {
         return tracks[index]
     }
 
+    var playingTrack: Track? {
+        guard let currentTrackID = audioPlayer?.currentTrackID,
+              let index = trackIndex(for: currentTrackID) else {
+            return nil
+        }
+        return tracks[index]
+    }
+
     var hasTracks: Bool {
         !tracks.isEmpty
     }
