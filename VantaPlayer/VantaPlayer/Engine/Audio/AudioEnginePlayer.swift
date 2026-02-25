@@ -12,7 +12,6 @@ final class AudioEnginePlayer: ObservableObject {
 
     var onPlaybackEnded: (() -> Void)?
 
-    private let analyzer: AudioAnalyzer?
     private let engine = AVAudioEngine()
     private let playerNode = AVAudioPlayerNode()
     private let playbackMixer = AVAudioMixerNode()
@@ -23,15 +22,13 @@ final class AudioEnginePlayer: ObservableObject {
     private var pausedFrame: AVAudioFramePosition = 0
     private var scheduleGeneration: UInt64 = 0
 
-    init(analyzer: AudioAnalyzer? = nil) {
-        self.analyzer = analyzer
+    init() {
         configureEngineGraph()
         configureProgressTimer()
     }
 
     deinit {
         progressTimer?.invalidate()
-        analyzer?.removeTap()
         engine.stop()
     }
 
@@ -108,7 +105,6 @@ final class AudioEnginePlayer: ObservableObject {
         isPlaying = false
         currentTime = 0
         duration = 0
-        analyzer?.reset()
     }
 
     func seek(to targetTime: TimeInterval) {
@@ -137,7 +133,6 @@ final class AudioEnginePlayer: ObservableObject {
         engine.connect(playbackMixer, to: engine.mainMixerNode, format: nil)
 
         playbackMixer.outputVolume = volume
-        analyzer?.installTap(on: playbackMixer, bus: 0)
     }
 
     private func configureProgressTimer() {

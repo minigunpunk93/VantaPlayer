@@ -45,7 +45,8 @@ final class PlayerViewModel: ObservableObject {
 
     private var playerCancellables: Set<AnyCancellable> = []
     private var importTask: Task<Void, Never>?
-    private var persistenceTask: Task<Void, Never>?
+    private var queuePersistenceTask: Task<Void, Never>?
+    private var playbackPersistenceTask: Task<Void, Never>?
 
     private var shouldAutoplayOnImport = false
     private var didAutoplayDuringImport = false
@@ -258,7 +259,7 @@ final class PlayerViewModel: ObservableObject {
     func moveTracks(from source: IndexSet, to destination: Int) {
         tracks.move(fromOffsets: source, toOffset: destination)
         rebuildTrackIndexCache()
-        scheduleSessionSave()
+        scheduleQueueSave()
     }
 
     func playTrack(with id: Track.ID) {
@@ -269,7 +270,7 @@ final class PlayerViewModel: ObservableObject {
         if isPlaying {
             audioPlayer?.pause()
             refreshNowPlayingInfo(force: true)
-            scheduleSessionSave()
+            schedulePlaybackSave()
             return
         }
 
@@ -278,7 +279,7 @@ final class PlayerViewModel: ObservableObject {
         if audioPlayer?.currentTrackID == targetTrack.id {
             ensureAudioStack().play()
             refreshNowPlayingInfo(force: true)
-            scheduleSessionSave()
+            schedulePlaybackSave()
         } else {
             playTrack(with: targetTrack.id)
         }
@@ -296,20 +297,20 @@ final class PlayerViewModel: ObservableObject {
 
     func seek(by delta: TimeInterval) {
         audioPlayer?.seek(by: delta)
-        scheduleSessionSave()
+        schedulePlaybackSave()
         refreshNowPlayingInfo(force: true)
     }
 
     func seek(to time: TimeInterval) {
         audioPlayer?.seek(to: time)
-        scheduleSessionSave()
+        schedulePlaybackSave()
         refreshNowPlayingInfo(force: true)
     }
 
     func setVolume(_ value: Float) {
         preferredVolume = max(0, min(value, 1))
         audioPlayer?.setVolume(preferredVolume)
-        scheduleSessionSave()
+        schedulePlaybackSave()
     }
 
     func adjustVolume(by delta: Float) {
@@ -335,7 +336,8 @@ final class PlayerViewModel: ObservableObject {
             selectedTrackID = nil
             audioPlayer?.unload()
             inlineError = nil
-            scheduleSessionSave()
+            scheduleQueueSave()
+            schedulePlaybackSave()
             refreshNowPlayingInfo(force: true)
             return
         }
@@ -357,7 +359,8 @@ final class PlayerViewModel: ObservableObject {
             inlineError = nil
         }
 
-        scheduleSessionSave()
+        scheduleQueueSave()
+        schedulePlaybackSave()
         refreshNowPlayingInfo(force: true)
     }
 
@@ -398,7 +401,6 @@ final class PlayerViewModel: ObservableObject {
             return audioPlayer
         }
 
-        // Keep visualizer/analyzer inactive in M2.0: no Metal view is mounted, and we avoid FFT tap work.
         let player = AudioEnginePlayer()
         player.setVolume(preferredVolume)
         player.onPlaybackEnded = { [weak self] in
@@ -462,18 +464,31 @@ final class PlayerViewModel: ObservableObject {
             try player.loadTrack(tracks[index], autoplay: autoplay, startTime: startTime)
             playbackPositions[id] = player.currentTime
 
+            var didMutateQueue = false
             if tracks[index].duration == nil && player.duration > 0 {
                 tracks[index].duration = player.duration
+                didMutateQueue = true
+            }
+            if tracks[index].unplayableReason != nil {
+                didMutateQueue = true
             }
             tracks[index].unplayableReason = nil
 
-            scheduleSessionSave()
+            if didMutateQueue {
+                scheduleQueueSave()
+            }
+            schedulePlaybackSave()
             refreshNowPlayingInfo(force: true)
         } catch {
+            let wasPlayable = tracks[index].isPlayable
+            let previousReason = tracks[index].unplayableReason
             tracks[index].isPlayable = false
             tracks[index].unplayableReason = "Failed to decode audio"
             presentError("Couldn’t decode “\(tracks[index].title)”.", trackID: id)
-            scheduleSessionSave()
+            if wasPlayable || previousReason != tracks[index].unplayableReason {
+                scheduleQueueSave()
+            }
+            schedulePlaybackSave()
             refreshNowPlayingInfo(force: true)
         }
     }
@@ -516,7 +531,8 @@ final class PlayerViewModel: ObservableObject {
 
         shouldAutoplayOnImport = false
         didAutoplayDuringImport = false
-        scheduleSessionSave()
+        scheduleQueueSave()
+        schedulePlaybackSave()
     }
 
     @discardableResult
@@ -693,28 +709,38 @@ final class PlayerViewModel: ObservableObject {
         let roundedSecond = Int(currentTime)
         guard roundedSecond != lastPersistedSecond else { return }
         lastPersistedSecond = roundedSecond
-        scheduleSessionSave()
+        schedulePlaybackSave()
     }
 
-    private func scheduleSessionSave() {
-        persistenceTask?.cancel()
-        let snapshot = makeSessionSnapshot()
+    private func scheduleQueueSave() {
+        queuePersistenceTask?.cancel()
+        let snapshot = SessionStore.QueueSnapshot(tracks: tracks)
 
-        persistenceTask = Task.detached(priority: .utility) { [sessionStore] in
+        queuePersistenceTask = Task.detached(priority: .utility) { [sessionStore] in
             try? await Task.sleep(nanoseconds: 300_000_000)
             guard !Task.isCancelled else { return }
-            sessionStore.save(snapshot: snapshot)
+            sessionStore.saveQueue(snapshot: snapshot)
         }
     }
 
-    private func makeSessionSnapshot() -> SessionStore.Snapshot {
+    private func schedulePlaybackSave() {
+        playbackPersistenceTask?.cancel()
+        let snapshot = makePlaybackSnapshot()
+
+        playbackPersistenceTask = Task.detached(priority: .utility) { [sessionStore] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else { return }
+            sessionStore.savePlayback(snapshot: snapshot)
+        }
+    }
+
+    private func makePlaybackSnapshot() -> SessionStore.PlaybackSnapshot {
         var positions = playbackPositions
         if let currentTrackID = audioPlayer?.currentTrackID {
             positions[currentTrackID] = audioPlayer?.currentTime ?? positions[currentTrackID] ?? 0
         }
 
-        return SessionStore.Snapshot(
-            tracks: tracks,
+        return SessionStore.PlaybackSnapshot(
             selectedTrackID: selectedTrackID,
             playingTrackID: audioPlayer?.currentTrackID ?? selectedTrackID,
             playbackPositions: positions,
