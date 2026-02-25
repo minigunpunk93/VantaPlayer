@@ -286,15 +286,90 @@ struct PlayerView: View {
     }
 
     private var normalTransportStrip: some View {
-        transportStrip(isCompact: false)
+        VStack(spacing: max(6, density.transportSpacing - 2)) {
+            SeekBar(
+                value: scrubPosition,
+                range: seekRange,
+                isEnabled: viewModel.hasTracks,
+                onScrubBegan: {
+                    isScrubbing = true
+                },
+                onScrubChanged: { newValue in
+                    scrubPosition = newValue
+                },
+                onScrubEnded: { finalValue in
+                    scrubPosition = finalValue
+                    isScrubbing = false
+                    viewModel.seek(to: finalValue)
+                }
+            )
+            .help("Seek")
+            .accessibilityLabel("Playback position")
+
+            HStack(spacing: density.transportSpacing) {
+                Button {
+                    viewModel.playPrevious()
+                } label: {
+                    Image(systemName: "backward.fill")
+                }
+                .buttonStyle(.borderless)
+                .help("Previous track")
+                .accessibilityLabel("Previous track")
+                .disabled(!viewModel.hasTracks)
+
+                Button {
+                    viewModel.togglePlayPause()
+                } label: {
+                    Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.body.weight(.semibold))
+                        .frame(width: 16)
+                }
+                .buttonStyle(.plain)
+                .help("Play or pause")
+                .accessibilityLabel(viewModel.isPlaying ? "Pause" : "Play")
+                .disabled(!viewModel.hasTracks)
+
+                Button {
+                    viewModel.playNext()
+                } label: {
+                    Image(systemName: "forward.fill")
+                }
+                .buttonStyle(.borderless)
+                .help("Next track")
+                .accessibilityLabel("Next track")
+                .disabled(!viewModel.hasTracks)
+
+                Text(timeString(scrubPosition))
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(width: density.transportTimeWidth, alignment: .trailing)
+
+                Text(timeString(viewModel.playbackDuration))
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .frame(width: density.transportTimeWidth, alignment: .leading)
+
+                Spacer(minLength: 0)
+
+                Image(systemName: "speaker.fill")
+                    .foregroundStyle(.secondary)
+
+                Slider(value: volumeBinding, in: 0...1)
+                    .frame(width: density.volumeSliderWidth)
+                    .help("Volume")
+                    .accessibilityLabel("Volume")
+            }
+        }
+        .controlSize(density.controlSize)
+        .padding(.horizontal, max(6, density.transportHorizontalPadding - 2))
+        .padding(.vertical, density.transportVerticalPadding)
+        .vantaCard(cornerRadius: density.cardCornerRadius)
+        .accessibilityElement(children: .contain)
     }
 
     private var compactTransportOnlyStrip: some View {
-        transportStrip(isCompact: true)
-    }
-
-    @ViewBuilder
-    private func transportStrip(isCompact: Bool) -> some View {
         HStack(spacing: density.transportSpacing) {
             Button {
                 viewModel.playPrevious()
@@ -328,9 +403,7 @@ struct PlayerView: View {
             .accessibilityLabel("Next track")
             .disabled(!viewModel.hasTracks)
 
-            if isCompact {
-                compactTrackMenu
-            }
+            compactTrackMenu
 
             Text(timeString(scrubPosition))
                 .font(.caption)
@@ -481,6 +554,91 @@ struct PlayerView: View {
         }
 
         return "\(minutes):\(paddedSeconds)"
+    }
+}
+
+private struct SeekBar: View {
+    let value: Double
+    let range: ClosedRange<Double>
+    let isEnabled: Bool
+    let onScrubBegan: () -> Void
+    let onScrubChanged: (Double) -> Void
+    let onScrubEnded: (Double) -> Void
+
+    @State private var isTracking = false
+
+    private var normalizedProgress: CGFloat {
+        let span = range.upperBound - range.lowerBound
+        guard span > 0 else { return 0 }
+        let clampedValue = min(max(value, range.lowerBound), range.upperBound)
+        return CGFloat((clampedValue - range.lowerBound) / span)
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            let width = max(geometry.size.width, 1)
+
+            ZStack(alignment: .leading) {
+                Capsule(style: .continuous)
+                    .fill(Color.primary.opacity(0.14))
+
+                Capsule(style: .continuous)
+                    .fill(Color.accentColor)
+                    .frame(width: width * normalizedProgress)
+            }
+            .frame(height: 8)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { gesture in
+                        guard isEnabled else { return }
+                        beginTrackingIfNeeded()
+                        onScrubChanged(resolvedValue(for: gesture.location.x, width: width))
+                    }
+                    .onEnded { gesture in
+                        guard isEnabled else { return }
+                        let finalValue = resolvedValue(for: gesture.location.x, width: width)
+                        beginTrackingIfNeeded()
+                        onScrubChanged(finalValue)
+                        onScrubEnded(finalValue)
+                        isTracking = false
+                    }
+            )
+        }
+        .frame(height: 8)
+        .opacity(isEnabled ? 1 : 0.55)
+        .allowsHitTesting(isEnabled)
+        .accessibilityElement(children: .ignore)
+        .accessibilityAdjustableAction { direction in
+            guard isEnabled else { return }
+            let step = max((range.upperBound - range.lowerBound) / 20, 1)
+            let adjustedValue: Double
+
+            switch direction {
+            case .increment:
+                adjustedValue = min(max(value + step, range.lowerBound), range.upperBound)
+            case .decrement:
+                adjustedValue = min(max(value - step, range.lowerBound), range.upperBound)
+            @unknown default:
+                return
+            }
+
+            onScrubBegan()
+            onScrubChanged(adjustedValue)
+            onScrubEnded(adjustedValue)
+        }
+    }
+
+    private func beginTrackingIfNeeded() {
+        guard !isTracking else { return }
+        isTracking = true
+        onScrubBegan()
+    }
+
+    private func resolvedValue(for locationX: CGFloat, width: CGFloat) -> Double {
+        let ratio = min(max(locationX / width, 0), 1)
+        let resolved = range.lowerBound + (range.upperBound - range.lowerBound) * Double(ratio)
+        return min(max(resolved, range.lowerBound), range.upperBound)
     }
 }
 
