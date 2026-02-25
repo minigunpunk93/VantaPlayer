@@ -36,6 +36,7 @@ final class PlayerViewModel: ObservableObject {
 
     private var preferredVolume: Float = 0.8
     private var playbackPositions: [Track.ID: TimeInterval] = [:]
+    private var trackIndexByID: [Track.ID: Int] = [:]
 
     private let bookmarksStore = BookmarksStore()
     private let sessionStore: SessionStore
@@ -55,6 +56,7 @@ final class PlayerViewModel: ObservableObject {
     private var remoteCommandsConfigured = false
     private var remoteCommandTargets: [Any] = []
     private var lastNowPlayingUpdate = Date.distantPast
+    private var nowPlayingArtworkCache: [Track.ID: MPMediaItemArtwork] = [:]
     #endif
 
     private static let allowedExtensions: Set<String> = ["wav", "mp3", "m4a", "aiff", "aif", "flac"]
@@ -90,8 +92,11 @@ final class PlayerViewModel: ObservableObject {
     }
 
     var currentTrack: Track? {
-        guard let selectedTrackID else { return nil }
-        return tracks.first(where: { $0.id == selectedTrackID })
+        guard let selectedTrackID,
+              let index = trackIndex(for: selectedTrackID) else {
+            return nil
+        }
+        return tracks[index]
     }
 
     var hasTracks: Bool {
@@ -252,6 +257,7 @@ final class PlayerViewModel: ObservableObject {
 
     func moveTracks(from source: IndexSet, to destination: Int) {
         tracks.move(fromOffsets: source, toOffset: destination)
+        rebuildTrackIndexCache()
         scheduleSessionSave()
     }
 
@@ -311,15 +317,19 @@ final class PlayerViewModel: ObservableObject {
     }
 
     func removeTrack(id: Track.ID) {
-        guard let removingIndex = tracks.firstIndex(where: { $0.id == id }) else { return }
+        guard let removingIndex = trackIndex(for: id) else { return }
 
         let removedTrack = tracks[removingIndex]
         let removingSelectedTrack = selectedTrackID == id
         let removingCurrentAudio = audioPlayer?.currentTrackID == id
 
         tracks.remove(at: removingIndex)
+        rebuildTrackIndexCache()
         playbackPositions.removeValue(forKey: id)
         bookmarksStore.endAccess(to: removedTrack.url)
+        #if canImport(MediaPlayer)
+        nowPlayingArtworkCache.removeValue(forKey: id)
+        #endif
 
         if tracks.isEmpty {
             selectedTrackID = nil
@@ -435,7 +445,7 @@ final class PlayerViewModel: ObservableObject {
     }
 
     private func playTrack(with id: Track.ID, autoplay: Bool, explicitStartTime: TimeInterval?) {
-        guard let index = tracks.firstIndex(where: { $0.id == id }) else { return }
+        guard let index = trackIndex(for: id) else { return }
 
         selectedTrackID = id
         inlineError = nil
@@ -523,6 +533,7 @@ final class PlayerViewModel: ObservableObject {
         _ = bookmarksStore.beginAccess(to: track.url)
 
         tracks.append(track)
+        trackIndexByID[track.id] = tracks.count - 1
         if selectedTrackID == nil {
             selectedTrackID = track.id
         }
@@ -546,9 +557,13 @@ final class PlayerViewModel: ObservableObject {
         guard let restoredSession else { return }
 
         tracks = restoredSession.tracks
+        rebuildTrackIndexCache()
         for track in tracks {
             _ = bookmarksStore.beginAccess(to: track.url)
         }
+        #if canImport(MediaPlayer)
+        nowPlayingArtworkCache.removeAll(keepingCapacity: true)
+        #endif
 
         playbackPositions = restoredSession.playbackPositions
         preferredVolume = max(0, min(restoredSession.volume, 1))
@@ -559,9 +574,9 @@ final class PlayerViewModel: ObservableObject {
 
         let anchorTrackID = restoredSession.playingTrackID ?? selectedTrackID
         if let anchorTrackID,
-           let anchorTrack = tracks.first(where: { $0.id == anchorTrackID }) {
+           let anchorIndex = trackIndex(for: anchorTrackID) {
             let startTime = playbackPositions[anchorTrackID] ?? 0
-            playTrack(with: anchorTrack.id, autoplay: restoredSession.wasPlaying, explicitStartTime: startTime)
+            playTrack(with: tracks[anchorIndex].id, autoplay: restoredSession.wasPlaying, explicitStartTime: startTime)
         } else {
             refreshNowPlayingInfo(force: true)
         }
@@ -569,8 +584,8 @@ final class PlayerViewModel: ObservableObject {
 
     private func selectedTrackForPlayback() -> Track? {
         if let selectedTrackID,
-           let selectedTrack = tracks.first(where: { $0.id == selectedTrackID }) {
-            return selectedTrack
+           let selectedTrackIndex = trackIndex(for: selectedTrackID) {
+            return tracks[selectedTrackIndex]
         }
 
         if let firstPlayable = tracks.first(where: { $0.isPlayable }) {
@@ -599,12 +614,12 @@ final class PlayerViewModel: ObservableObject {
 
     private func playbackAnchorIndex() -> Int {
         if let selectedTrackID,
-           let selectedIndex = tracks.firstIndex(where: { $0.id == selectedTrackID }) {
+           let selectedIndex = trackIndex(for: selectedTrackID) {
             return selectedIndex
         }
 
         if let currentTrackID = audioPlayer?.currentTrackID,
-           let currentIndex = tracks.firstIndex(where: { $0.id == currentTrackID }) {
+           let currentIndex = trackIndex(for: currentTrackID) {
             return currentIndex
         }
 
@@ -653,6 +668,25 @@ final class PlayerViewModel: ObservableObject {
 
     private func normalizedURL(_ url: URL) -> URL {
         url.standardizedFileURL.resolvingSymlinksInPath()
+    }
+
+    private func trackIndex(for id: Track.ID) -> Int? {
+        if let cachedIndex = trackIndexByID[id],
+           tracks.indices.contains(cachedIndex),
+           tracks[cachedIndex].id == id {
+            return cachedIndex
+        }
+
+        rebuildTrackIndexCache()
+        return trackIndexByID[id]
+    }
+
+    private func rebuildTrackIndexCache() {
+        trackIndexByID.removeAll(keepingCapacity: true)
+        trackIndexByID.reserveCapacity(tracks.count)
+        for (index, track) in tracks.enumerated() {
+            trackIndexByID[track.id] = index
+        }
     }
 
     private func maybePersistPlaybackPosition(currentTime: TimeInterval) {
@@ -770,13 +804,8 @@ final class PlayerViewModel: ObservableObject {
             info[MPMediaItemPropertyPlaybackDuration] = resolvedDuration
         }
 
-        if let artworkData = currentTrack.artworkData,
-           let artworkImage = NSImage(data: artworkData) {
-            info[MPMediaItemPropertyArtwork] = MPMediaItemArtwork(
-                boundsSize: artworkImage.size
-            ) { _ in
-                artworkImage
-            }
+        if let artwork = cachedArtwork(for: currentTrack) {
+            info[MPMediaItemPropertyArtwork] = artwork
         }
 
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
@@ -786,6 +815,23 @@ final class PlayerViewModel: ObservableObject {
         }
         #endif
     }
+
+    #if canImport(MediaPlayer)
+    private func cachedArtwork(for track: Track) -> MPMediaItemArtwork? {
+        if let cachedArtwork = nowPlayingArtworkCache[track.id] {
+            return cachedArtwork
+        }
+
+        guard let artworkData = track.artworkData,
+              let artworkImage = NSImage(data: artworkData) else {
+            return nil
+        }
+
+        let artwork = MPMediaItemArtwork(boundsSize: artworkImage.size) { _ in artworkImage }
+        nowPlayingArtworkCache[track.id] = artwork
+        return artwork
+    }
+    #endif
 }
 
 private enum TrackImportWorker {

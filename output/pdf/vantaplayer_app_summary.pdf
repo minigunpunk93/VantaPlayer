@@ -1,0 +1,84 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 1 /Kids [3 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+6 0 obj
+<< /Length 4003 >>
+stream
+q
+1 1 1 rg
+0 0 612 792 re
+f
+Q
+0 0 0 rg
+BT /F2 16 Tf 48.00 760.00 Td (VantaPlayer - Repository Summary) Tj ET
+BT /F1 9 Tf 48.00 740.00 Td (Evidence source: repository code/docs only. Missing items are marked as Not found in repo.) Tj ET
+BT /F2 12 Tf 48.00 722.00 Td (What it is) Tj ET
+BT /F1 10 Tf 48.00 706.00 Td (VantaPlayer is a macOS SwiftUI desktop audio player for local files. It imports audio) Tj ET
+BT /F1 10 Tf 48.00 693.00 Td (files/folders, manages a playback queue, and runs playback through AVAudioEngine.) Tj ET
+BT /F2 12 Tf 48.00 676.00 Td (Who it's for) Tj ET
+BT /F1 10 Tf 48.00 660.00 Td (- Primary user/persona \(explicit statement\): Not found in repo.) Tj ET
+BT /F1 10 Tf 48.00 647.00 Td (- Inferred from code: a macOS user managing and playing local audio files with keyboard and) Tj ET
+BT /F1 10 Tf 48.00 634.00 Td (  menu controls.) Tj ET
+BT /F2 12 Tf 48.00 617.00 Td (What it does) Tj ET
+BT /F1 10 Tf 48.00 601.00 Td (- Imports audio through Open File, Import Folder, and drag-and-drop; accepts) Tj ET
+BT /F1 10 Tf 48.00 588.00 Td (  wav/mp3/m4a/aiff/flac.) Tj ET
+BT /F1 10 Tf 48.00 575.00 Td (- Builds a selectable/reorderable queue, supports remove actions, and flags unplayable tracks.) Tj ET
+BT /F1 10 Tf 48.00 562.00 Td (- Provides playback controls: play/pause, previous/next, seek, scrubbing slider, and volume) Tj ET
+BT /F1 10 Tf 48.00 549.00 Td (  control.) Tj ET
+BT /F1 10 Tf 48.00 536.00 Td (- Extracts metadata/duration/artwork from AVURLAsset and shows title, artist, album, and track) Tj ET
+BT /F1 10 Tf 48.00 523.00 Td (  status.) Tj ET
+BT /F1 10 Tf 48.00 510.00 Td (- Saves and restores session state: queue, selected/playing track, playback positions, and) Tj ET
+BT /F1 10 Tf 48.00 497.00 Td (  volume.) Tj ET
+BT /F1 10 Tf 48.00 484.00 Td (- Integrates keyboard shortcuts, menu commands, MPRemoteCommandCenter, and Now Playing info) Tj ET
+BT /F1 10 Tf 48.00 471.00 Td (  updates.) Tj ET
+BT /F1 10 Tf 48.00 458.00 Td (- Supports compact/normal modes, playlist and inspector toggles, and density presets in UI) Tj ET
+BT /F1 10 Tf 48.00 445.00 Td (  settings.) Tj ET
+BT /F2 12 Tf 48.00 428.00 Td (How it works \(repo-evidenced architecture\)) Tj ET
+BT /F1 10 Tf 48.00 412.00 Td (- UI layer: VantaPlayerApp -> PlayerView -> PlayerViewModel \(SwiftUI state + command) Tj ET
+BT /F1 10 Tf 48.00 399.00 Td (  handling\).) Tj ET
+BT /F1 10 Tf 48.00 386.00 Td (- Playback service: AudioEnginePlayer wraps AVAudioEngine, AVAudioPlayerNode, and) Tj ET
+BT /F1 10 Tf 48.00 373.00 Td (  AVAudioMixerNode.) Tj ET
+BT /F1 10 Tf 48.00 360.00 Td (- Import pipeline: TrackImportWorker scans files/folders, filters extensions, loads metadata,) Tj ET
+BT /F1 10 Tf 48.00 347.00 Td (  creates Track models.) Tj ET
+BT /F1 10 Tf 48.00 334.00 Td (- Persistence services: SessionStore serializes session snapshots to UserDefaults;) Tj ET
+BT /F1 10 Tf 48.00 321.00 Td (  BookmarksStore manages security-scoped bookmarks.) Tj ET
+BT /F1 10 Tf 48.00 308.00 Td (- Data flow: user action -> PlayerViewModel updates tracks/selection -> AudioEnginePlayer) Tj ET
+BT /F1 10 Tf 48.00 295.00 Td (  publishes time/state -> UI refresh + debounced session save.) Tj ET
+BT /F1 10 Tf 48.00 282.00 Td (- Visualizer pipeline exists in repo \(AudioAnalyzer -> SpectrumStore ->) Tj ET
+BT /F1 10 Tf 48.00 269.00 Td (  VisualizerView/RibbonRenderer\), with a comment noting it is inactive in current) Tj ET
+BT /F1 10 Tf 48.00 256.00 Td (  PlayerViewModel wiring.) Tj ET
+BT /F2 12 Tf 48.00 239.00 Td (How to run \(minimal\)) Tj ET
+BT /F1 10 Tf 48.00 223.00 Td (- Open /Users/dmitry/Projects/VantaPlayer/VantaPlayer/VantaPlayer.xcodeproj in Xcode.) Tj ET
+BT /F1 10 Tf 48.00 210.00 Td (- Select the VantaPlayer scheme/target and a macOS run destination, then Run \(Cmd+R\).) Tj ET
+BT /F1 10 Tf 48.00 197.00 Td (- After launch, import audio via Open Audio Files \(Cmd+O\) or Import Folder \(Cmd+Shift+O\).) Tj ET
+BT /F1 10 Tf 48.00 184.00 Td (- Standalone CLI/devcontainer setup instructions: Not found in repo.) Tj ET
+endstream
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000257 00000 n 
+0000000327 00000 n 
+0000000402 00000 n 
+trailer
+<< /Size 7 /Root 1 0 R >>
+startxref
+4456
+%%EOF

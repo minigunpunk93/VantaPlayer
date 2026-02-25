@@ -210,7 +210,6 @@ final class AudioEnginePlayer: ObservableObject {
         let currentFrame = currentPlaybackFrame()
         pausedFrame = currentFrame
         currentTime = seconds(for: currentFrame, in: currentFile)
-        duration = fileDuration(for: currentFile)
 
         if isPlaying != playerNode.isPlaying {
             isPlaying = playerNode.isPlaying

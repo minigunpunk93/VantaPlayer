@@ -3,7 +3,6 @@ import SwiftUI
 
 struct ViewCommands: Commands {
     @AppStorage(AppStorageKeys.isCompactMode) private var isCompactMode = false
-    @AppStorage(AppStorageKeys.isPlaylistVisible) private var isPlaylistVisible = true
     @AppStorage(AppStorageKeys.isInspectorVisible) private var isInspectorVisible = true
     @AppStorage(AppStorageKeys.densityMode) private var densityModeRawValue = DensityMode.comfortable.rawValue
 
@@ -22,13 +21,6 @@ struct ViewCommands: Commands {
                 isCompactMode.toggle()
             }
             .keyboardShortcut("c", modifiers: [.control, .command])
-
-            Button("Toggle Playlist") {
-                guard !isCompactMode else { return }
-                isPlaylistVisible.toggle()
-            }
-            .keyboardShortcut("s", modifiers: [.command, .option])
-            .disabled(isCompactMode)
 
             Button("Toggle Inspector") {
                 guard !isCompactMode else { return }

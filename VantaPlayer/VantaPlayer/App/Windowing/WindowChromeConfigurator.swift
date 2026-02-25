@@ -110,24 +110,23 @@ private struct WindowChromeInstaller: ViewModifier {
                     windowCoordinator.attach(window: window)
                     windowCoordinator.setCompactModeEnabled(isCompactMode)
                     windowCoordinator.setSectionVisibility(
-                        playlistVisible: isPlaylistVisible,
+                        playlistVisible: true,
                         inspectorVisible: isInspectorVisible
                     )
                 }
                 .frame(width: 0, height: 0)
             }
+            .onAppear {
+                if !isPlaylistVisible {
+                    isPlaylistVisible = true
+                }
+            }
             .onChange(of: isCompactMode) { _, newValue in
                 windowCoordinator.setCompactModeEnabled(newValue)
             }
-            .onChange(of: isPlaylistVisible) { _, newValue in
-                windowCoordinator.setSectionVisibility(
-                    playlistVisible: newValue,
-                    inspectorVisible: isInspectorVisible
-                )
-            }
             .onChange(of: isInspectorVisible) { _, newValue in
                 windowCoordinator.setSectionVisibility(
-                    playlistVisible: isPlaylistVisible,
+                    playlistVisible: true,
                     inspectorVisible: newValue
                 )
             }

@@ -18,7 +18,6 @@ struct PlayerView: View {
     @State private var sectionVisibilityBeforeCompact: SectionVisibilitySnapshot?
 
     private struct SectionVisibilitySnapshot {
-        let playlistVisible: Bool
         let inspectorVisible: Bool
     }
 
@@ -62,12 +61,15 @@ struct PlayerView: View {
         )
     }
 
-    private var sectionAnimation: Animation? {
-        reduceMotion ? nil : .easeInOut(duration: 0.18)
+    private var sectionTransition: AnyTransition {
+        .opacity
     }
 
-    private var sectionTransition: AnyTransition {
-        reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.98, anchor: .top))
+    private var minimumPlaylistSectionHeight: CGFloat {
+        let minimumRowCount: CGFloat = 3
+        let rowBlock = density.playlistRowHeight * minimumRowCount
+        let rowPadding = density.playlistRowVerticalPadding * minimumRowCount * 2
+        return max(140, rowBlock + rowPadding + 20)
     }
 
     private var chromeTopSpacerHeight: CGFloat {
@@ -96,7 +98,7 @@ struct PlayerView: View {
                 NormalPlayerLayoutView(
                     density: density,
                     sectionTransition: sectionTransition,
-                    showPlaylist: isPlaylistVisible,
+                    showPlaylist: true,
                     showInspector: isInspectorVisible,
                     headerView: AnyView(nowPlayingHeader),
                     inlineErrorView: inlineErrorBannerView,
@@ -116,9 +118,6 @@ struct PlayerView: View {
         } isTargeted: { targeted in
             dropTargetActive = targeted
         }
-        .animation(sectionAnimation, value: isPlaylistVisible)
-        .animation(sectionAnimation, value: isInspectorVisible)
-        .animation(sectionAnimation, value: viewModel.inlineError != nil)
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
                 if !isCompactMode {
@@ -154,15 +153,6 @@ struct PlayerView: View {
 
                 if !isCompactMode {
                     Button {
-                        togglePlaylistVisibility()
-                    } label: {
-                        Image(systemName: isPlaylistVisible ? "list.bullet.rectangle.fill" : "list.bullet.rectangle")
-                    }
-                    .help("Toggle playlist (⌥⌘S)")
-                    .accessibilityLabel("Toggle playlist")
-                    .accessibilityHint("Show or hide the playlist section")
-
-                    Button {
                         toggleInspectorVisibility()
                     } label: {
                         Image(systemName: isInspectorVisible ? "info.circle.fill" : "info.circle")
@@ -184,6 +174,9 @@ struct PlayerView: View {
             viewModel.bootstrapAfterFirstFrame()
         }
         .onAppear {
+            if !isPlaylistVisible {
+                isPlaylistVisible = true
+            }
             scrubPosition = viewModel.playbackTime
             applyCompactModeDefaultsOnAppearIfNeeded()
         }
@@ -237,6 +230,7 @@ struct PlayerView: View {
     private var normalPlaylistSection: some View {
         playlistCard
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .frame(minHeight: minimumPlaylistSectionHeight)
             .accessibilitySortPriority(3)
     }
 
@@ -440,10 +434,8 @@ struct PlayerView: View {
         guard isCompactMode else { return }
 
         sectionVisibilityBeforeCompact = SectionVisibilitySnapshot(
-            playlistVisible: isPlaylistVisible,
             inspectorVisible: isInspectorVisible
         )
-        isPlaylistVisible = false
         isInspectorVisible = false
     }
 
@@ -452,13 +444,10 @@ struct PlayerView: View {
 
         if newValue {
             sectionVisibilityBeforeCompact = SectionVisibilitySnapshot(
-                playlistVisible: isPlaylistVisible,
                 inspectorVisible: isInspectorVisible
             )
-            isPlaylistVisible = false
             isInspectorVisible = false
         } else if let snapshot = sectionVisibilityBeforeCompact {
-            isPlaylistVisible = snapshot.playlistVisible
             isInspectorVisible = snapshot.inspectorVisible
             sectionVisibilityBeforeCompact = nil
         }
@@ -468,25 +457,13 @@ struct PlayerView: View {
         isCompactMode.toggle()
     }
 
-    private func togglePlaylistVisibility() {
-        guard !isCompactMode else { return }
-
-        if reduceMotion {
-            isPlaylistVisible.toggle()
-        } else {
-            withAnimation(.easeInOut(duration: 0.18)) {
-                isPlaylistVisible.toggle()
-            }
-        }
-    }
-
     private func toggleInspectorVisibility() {
         guard !isCompactMode else { return }
 
         if reduceMotion {
             isInspectorVisible.toggle()
         } else {
-            withAnimation(.easeInOut(duration: 0.18)) {
+            withAnimation(.easeOut(duration: 0.12)) {
                 isInspectorVisible.toggle()
             }
         }

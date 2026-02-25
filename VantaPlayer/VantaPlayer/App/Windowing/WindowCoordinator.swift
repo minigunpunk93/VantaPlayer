@@ -4,7 +4,7 @@ import Foundation
 
 @MainActor
 final class WindowCoordinator: NSObject, ObservableObject {
-    private let fullNormalContentSize = NSSize(width: 520, height: 560)
+    private let fullNormalContentSize = NSSize(width: 520, height: 640)
     private let normalNoPlaylistContentHeight: CGFloat = 430
     private let normalNoInspectorContentHeight: CGFloat = 430
     private let compactContentHeight: CGFloat = 140
@@ -30,7 +30,7 @@ final class WindowCoordinator: NSObject, ObservableObject {
     }
 
     private var isCompactModeEnabled = WindowCoordinator.storedBool(AppStorageKeys.isCompactMode, default: false)
-    private var isPlaylistVisible = WindowCoordinator.storedBool(AppStorageKeys.isPlaylistVisible, default: true)
+    private var isPlaylistVisible = true
     private var isInspectorVisible = WindowCoordinator.storedBool(AppStorageKeys.isInspectorVisible, default: true)
     private var normalHeightPreset: NormalHeightPreset = .full
     private var isApplyingWindowMode = false
@@ -47,33 +47,37 @@ final class WindowCoordinator: NSObject, ObservableObject {
         proxiedDelegate = (window.delegate === self) ? nil : window.delegate
         window.delegate = self
         refreshChromeInsets(for: window)
+        normalHeightPreset = resolvedNormalHeightPreset(
+            playlistVisible: isPlaylistVisible,
+            inspectorVisible: isInspectorVisible
+        )
         applyCurrentWindowMode(setContentSize: true, animateResize: false)
     }
 
     func setCompactModeEnabled(_ enabled: Bool) {
         guard isCompactModeEnabled != enabled else { return }
         isCompactModeEnabled = enabled
-        applyCurrentWindowMode(setContentSize: true, animateResize: shouldAnimateWindowResize)
+        applyCurrentWindowMode(setContentSize: true, animateResize: false)
     }
 
     func setSectionVisibility(playlistVisible: Bool, inspectorVisible: Bool) {
-        let playlistBecameHidden = isPlaylistVisible && !playlistVisible
-        let inspectorBecameHidden = isInspectorVisible && !inspectorVisible
+        // Playlist is always visible in normal mode.
+        let resolvedPlaylistVisible = true
+        let didChange = isPlaylistVisible != resolvedPlaylistVisible || isInspectorVisible != inspectorVisible
 
-        isPlaylistVisible = playlistVisible
+        _ = playlistVisible
+        isPlaylistVisible = resolvedPlaylistVisible
         isInspectorVisible = inspectorVisible
 
-        guard playlistBecameHidden || inspectorBecameHidden else { return }
+        guard didChange else { return }
         guard !isCompactModeEnabled else { return }
         guard let window, !window.styleMask.contains(.fullScreen) else { return }
 
-        if !playlistVisible && !inspectorVisible {
-            UserDefaults.standard.set(true, forKey: AppStorageKeys.isCompactMode)
-            return
-        }
-
-        normalHeightPreset = !playlistVisible ? .noPlaylist : .noInspector
-        applyCurrentWindowMode(setContentSize: true, animateResize: shouldAnimateWindowResize)
+        normalHeightPreset = resolvedNormalHeightPreset(
+            playlistVisible: resolvedPlaylistVisible,
+            inspectorVisible: inspectorVisible
+        )
+        applyCurrentWindowMode(setContentSize: true, animateResize: false)
     }
 
     private func applyCurrentWindowMode(setContentSize: Bool, animateResize: Bool) {
@@ -180,6 +184,16 @@ final class WindowCoordinator: NSObject, ObservableObject {
         case .noInspector:
             return NSSize(width: fullNormalContentSize.width, height: normalNoInspectorContentHeight)
         }
+    }
+
+    private func resolvedNormalHeightPreset(playlistVisible: Bool, inspectorVisible: Bool) -> NormalHeightPreset {
+        if !playlistVisible {
+            return .noPlaylist
+        }
+        if !inspectorVisible {
+            return .noInspector
+        }
+        return .full
     }
 
     private func targetFrameSize(for window: NSWindow, contentSize: NSSize) -> NSSize {
