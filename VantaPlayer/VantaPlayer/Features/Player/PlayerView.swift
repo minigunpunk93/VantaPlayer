@@ -74,11 +74,11 @@ struct PlayerView: View {
 
     private var chromeTopSpacerHeight: CGFloat {
         guard isCompactMode else { return chromeInsets.top }
-        return min(max(chromeInsets.top, 8), 18)
+        return min(max(chromeInsets.top - 3, 5), 11)
     }
 
     private var rootTopPadding: CGFloat {
-        isCompactMode ? 4 : density.contentPadding
+        isCompactMode ? 2 : density.contentPadding
     }
 
     var body: some View {

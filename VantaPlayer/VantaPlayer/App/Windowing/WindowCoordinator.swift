@@ -7,8 +7,10 @@ final class WindowCoordinator: NSObject, ObservableObject {
     private let fullNormalContentSize = NSSize(width: 520, height: 640)
     private let normalNoPlaylistContentHeight: CGFloat = 430
     private let normalNoInspectorContentHeight: CGFloat = 430
-    private let compactContentHeight: CGFloat = 140
-    private var compactContentWidth: CGFloat { fullNormalContentSize.width }
+    private let compactContentHeight: CGFloat = 88
+    private let compactMinContentWidth: CGFloat = 420
+    private let compactMaxScreenWidthFraction: CGFloat = 0.5
+    private var compactDefaultContentWidth: CGFloat { fullNormalContentSize.width }
 
     private let fullscreenMinSize = NSSize(width: 240, height: 160)
     private let transitionMinSize = NSSize(width: 1, height: 1)
@@ -27,6 +29,11 @@ final class WindowCoordinator: NSObject, ObservableObject {
         case full
         case noPlaylist
         case noInspector
+    }
+
+    private struct CompactWidthLimits {
+        let min: CGFloat
+        let max: CGFloat
     }
 
     private var isCompactModeEnabled = WindowCoordinator.storedBool(AppStorageKeys.isCompactMode, default: false)
@@ -101,12 +108,26 @@ final class WindowCoordinator: NSObject, ObservableObject {
     }
 
     private func applyCompactMode(on window: NSWindow, setContentSize: Bool, animateResize: Bool) {
-        let targetFrameSize = compactTargetFrameSize(for: window)
-        applyFixedMode(
+        let compactBaseFrameSize = compactTargetFrameSize(for: window)
+        let widthLimits = compactFrameWidthLimits(for: window)
+        let targetWidth = compactTargetFrameWidth(for: window, widthLimits: widthLimits)
+        let targetFrameSize = NSSize(width: targetWidth, height: compactBaseFrameSize.height)
+
+        relaxResizeLimitsForTransition(on: window)
+
+        if setContentSize {
+            resizeWindowTopAnchored(
+                window,
+                targetFrameSize: targetFrameSize,
+                animate: animateResize && shouldAnimateWindowResize
+            )
+        }
+
+        lockCompactSize(
             on: window,
-            targetFrameSize: targetFrameSize,
-            setContentSize: setContentSize,
-            animateResize: animateResize
+            minWidth: widthLimits.min,
+            maxWidth: widthLimits.max,
+            fixedHeight: compactBaseFrameSize.height
         )
     }
 
@@ -159,6 +180,19 @@ final class WindowCoordinator: NSObject, ObservableObject {
         }
     }
 
+    private func lockCompactSize(on window: NSWindow, minWidth: CGFloat, maxWidth: CGFloat, fixedHeight: CGFloat) {
+        let compactMinSize = NSSize(width: minWidth, height: fixedHeight)
+        let compactMaxSize = NSSize(width: maxWidth, height: fixedHeight)
+
+        if !approximatelyEqual(window.minSize, compactMinSize) {
+            window.minSize = compactMinSize
+        }
+
+        if !approximatelyEqual(window.maxSize, compactMaxSize) {
+            window.maxSize = compactMaxSize
+        }
+    }
+
     private func relaxResizeLimitsForFullscreen(on window: NSWindow) {
         window.minSize = fullscreenMinSize
         window.maxSize = unconstrainedSize
@@ -171,8 +205,50 @@ final class WindowCoordinator: NSObject, ObservableObject {
     private func compactTargetFrameSize(for window: NSWindow) -> NSSize {
         targetFrameSize(
             for: window,
-            contentSize: NSSize(width: compactContentWidth, height: compactContentHeight)
+            contentSize: NSSize(width: compactDefaultContentWidth, height: compactContentHeight)
         )
+    }
+
+    private func compactTargetFrameWidth(for window: NSWindow, widthLimits: CompactWidthLimits) -> CGFloat {
+        let currentWidth = window.frame.width
+        let fallbackWidth = compactTargetFrameSize(for: window).width
+        let preferredWidth = (currentWidth.isFinite && currentWidth > 0) ? currentWidth : fallbackWidth
+        return preferredWidth.clamped(to: widthLimits.min...widthLimits.max)
+    }
+
+    private func compactFrameWidthLimits(for window: NSWindow) -> CompactWidthLimits {
+        let minimumFrameWidth = compactFrameWidth(for: window, contentWidth: compactMinContentWidth)
+        let defaultFrameWidth = compactTargetFrameSize(for: window).width
+
+        let halfScreenFrameWidth = compactHalfScreenFrameWidth(for: window)
+        let resolvedMaxWidth = max(halfScreenFrameWidth, 1)
+        let resolvedMinWidth = min(max(minimumFrameWidth, 1), resolvedMaxWidth)
+
+        if resolvedMaxWidth.isFinite, resolvedMaxWidth > 0 {
+            return CompactWidthLimits(min: resolvedMinWidth, max: resolvedMaxWidth)
+        }
+
+        let fallbackWidth = max(defaultFrameWidth, 1)
+        return CompactWidthLimits(min: fallbackWidth, max: fallbackWidth)
+    }
+
+    private func compactHalfScreenFrameWidth(for window: NSWindow) -> CGFloat {
+        guard let screen = window.screen ?? NSScreen.main else {
+            return compactTargetFrameSize(for: window).width
+        }
+
+        let halfWidth = floor(screen.visibleFrame.width * compactMaxScreenWidthFraction)
+        guard halfWidth.isFinite, halfWidth > 0 else {
+            return compactTargetFrameSize(for: window).width
+        }
+        return halfWidth
+    }
+
+    private func compactFrameWidth(for window: NSWindow, contentWidth: CGFloat) -> CGFloat {
+        targetFrameSize(
+            for: window,
+            contentSize: NSSize(width: contentWidth, height: compactContentHeight)
+        ).width
     }
 
     private func normalContentSize(for preset: NormalHeightPreset) -> NSSize {
@@ -262,7 +338,28 @@ final class WindowCoordinator: NSObject, ObservableObject {
     }
 }
 
+private extension CGFloat {
+    func clamped(to range: ClosedRange<CGFloat>) -> CGFloat {
+        Swift.min(Swift.max(self, range.lowerBound), range.upperBound)
+    }
+}
+
 extension WindowCoordinator: NSWindowDelegate {
+    nonisolated func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
+        MainActor.assumeIsolated { [weak self] in
+            guard let self else { return frameSize }
+
+            guard self.isCompactModeEnabled, !sender.styleMask.contains(.fullScreen) else {
+                return self.proxiedDelegate?.windowWillResize?(sender, to: frameSize) ?? frameSize
+            }
+
+            let widthLimits = self.compactFrameWidthLimits(for: sender)
+            let clampedWidth = frameSize.width.clamped(to: widthLimits.min...widthLimits.max)
+            let fixedHeight = self.compactTargetFrameSize(for: sender).height
+            return NSSize(width: clampedWidth, height: fixedHeight)
+        }
+    }
+
     nonisolated func windowWillEnterFullScreen(_ notification: Notification) {
         MainActor.assumeIsolated { [weak self] in
             guard let self, let window = self.window else { return }
@@ -306,6 +403,9 @@ extension WindowCoordinator: NSWindowDelegate {
     nonisolated func windowDidEndLiveResize(_ notification: Notification) {
         MainActor.assumeIsolated { [weak self] in
             guard let self else { return }
+            if self.isCompactModeEnabled {
+                self.applyCurrentWindowMode(setContentSize: false, animateResize: false)
+            }
             self.proxiedDelegate?.windowDidEndLiveResize?(notification)
         }
     }
