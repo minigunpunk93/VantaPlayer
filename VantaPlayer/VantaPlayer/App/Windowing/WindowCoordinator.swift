@@ -134,7 +134,10 @@ final class WindowCoordinator: NSObject, ObservableObject {
 
     private func applyNormalMode(on window: NSWindow, setContentSize: Bool, animateResize: Bool) {
         let targetFrameSize = normalTargetFrameSize(for: window)
-        let minimumFrameHeight = normalMinimumFrameSize(for: window).height
+        let minimumFrameHeight = resolvedNormalMinimumFrameHeight(
+            for: window,
+            targetFrameSize: targetFrameSize
+        )
 
         if setContentSize {
             resizeWindowTopAnchored(
@@ -198,6 +201,13 @@ final class WindowCoordinator: NSObject, ObservableObject {
 
     private func normalMinimumFrameSize(for window: NSWindow) -> NSSize {
         targetFrameSize(for: window, contentSize: normalMinContentSize)
+    }
+
+    private func resolvedNormalMinimumFrameHeight(for window: NSWindow, targetFrameSize: NSSize? = nil) -> CGFloat {
+        if isInspectorVisible {
+            return (targetFrameSize ?? normalTargetFrameSize(for: window)).height
+        }
+        return normalMinimumFrameSize(for: window).height
     }
 
     private func compactTargetFrameSize(for window: NSWindow) -> NSSize {
@@ -359,8 +369,12 @@ extension WindowCoordinator: NSWindowDelegate {
             }
 
             // Keep classic mode at a fixed width; only height remains resizable.
-            let fixedWidth = self.normalTargetFrameSize(for: sender).width
-            let minimumHeight = self.normalMinimumFrameSize(for: sender).height
+            let targetFrameSize = self.normalTargetFrameSize(for: sender)
+            let fixedWidth = targetFrameSize.width
+            let minimumHeight = self.resolvedNormalMinimumFrameHeight(
+                for: sender,
+                targetFrameSize: targetFrameSize
+            )
             let clampedHeight = max(frameSize.height, minimumHeight)
             return NSSize(width: fixedWidth, height: clampedHeight)
         }
