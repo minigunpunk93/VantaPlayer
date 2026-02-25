@@ -16,17 +16,59 @@ struct PlayerView: View {
     @State private var scrubPosition: Double = 0
     @State private var isScrubbing = false
     @State private var sectionVisibilityBeforeCompact: SectionVisibilitySnapshot?
+    @State private var availableContentHeight: CGFloat = 0
 
     private struct SectionVisibilitySnapshot {
         let inspectorVisible: Bool
     }
 
+    private enum AdaptiveNormalLayoutMode {
+        case full
+        case inspectorCollapsed
+        case compactFallback
+    }
+
+    private let inspectorCollapseHeightThreshold: CGFloat = 560
+    private let compactFallbackHeightThreshold: CGFloat = 430
+    private let contentHeightUpdateThreshold: CGFloat = 1
+
     private var storedDensityMode: DensityMode {
         DensityMode(rawValue: densityModeRawValue) ?? .comfortable
     }
 
+    private var adaptiveNormalLayoutMode: AdaptiveNormalLayoutMode {
+        guard !isCompactMode else { return .compactFallback }
+        guard availableContentHeight.isFinite, availableContentHeight > 0 else { return .full }
+
+        if availableContentHeight <= compactFallbackHeightThreshold {
+            return .compactFallback
+        }
+
+        if availableContentHeight <= inspectorCollapseHeightThreshold {
+            return .inspectorCollapsed
+        }
+
+        return .full
+    }
+
+    private var isAutoCompactFallbackEnabled: Bool {
+        !isCompactMode && adaptiveNormalLayoutMode == .compactFallback
+    }
+
+    private var isEffectiveCompactMode: Bool {
+        isCompactMode || isAutoCompactFallbackEnabled
+    }
+
+    private var isInspectorAutoCollapsed: Bool {
+        !isEffectiveCompactMode && adaptiveNormalLayoutMode == .inspectorCollapsed
+    }
+
+    private var shouldShowInspectorInNormalLayout: Bool {
+        isInspectorVisible && !isInspectorAutoCollapsed && !isEffectiveCompactMode
+    }
+
     private var activeDensityMode: DensityMode {
-        isCompactMode ? .compact : storedDensityMode
+        isEffectiveCompactMode ? .compact : storedDensityMode
     }
 
     private var density: DensityMetrics {
@@ -56,13 +98,24 @@ struct PlayerView: View {
         return max(140, rowBlock + rowPadding + 20)
     }
 
+    private var collapsedPlaylistSectionHeight: CGFloat {
+        let minimumRowCount: CGFloat = 2
+        let rowBlock = density.playlistRowHeight * minimumRowCount
+        let rowPadding = density.playlistRowVerticalPadding * minimumRowCount * 2
+        return max(110, rowBlock + rowPadding + 14)
+    }
+
+    private var effectivePlaylistSectionMinHeight: CGFloat {
+        isInspectorAutoCollapsed ? collapsedPlaylistSectionHeight : minimumPlaylistSectionHeight
+    }
+
     private var chromeTopSpacerHeight: CGFloat {
-        guard isCompactMode else { return chromeInsets.top }
+        guard isEffectiveCompactMode else { return chromeInsets.top }
         return min(max(chromeInsets.top - 3, 5), 11)
     }
 
     private var rootTopPadding: CGFloat {
-        isCompactMode ? 2 : density.contentPadding
+        isEffectiveCompactMode ? 2 : density.contentPadding
     }
 
     var body: some View {
@@ -75,7 +128,7 @@ struct PlayerView: View {
             .allowsHitTesting(false)
             .accessibilityHidden(true)
 
-            if isCompactMode {
+            if isEffectiveCompactMode {
                 compactTransportOnlyStrip
                     .accessibilitySortPriority(6)
             } else {
@@ -83,10 +136,10 @@ struct PlayerView: View {
                     density: density,
                     sectionTransition: sectionTransition,
                     showPlaylist: true,
-                    showInspector: isInspectorVisible,
+                    showInspector: shouldShowInspectorInNormalLayout,
                     headerView: AnyView(nowPlayingHeader),
                     inlineErrorView: inlineErrorBannerView,
-                    playlistView: AnyView(normalPlaylistSection),
+                    playlistView: AnyView(normalPlaylistSection(minHeight: effectivePlaylistSectionMinHeight)),
                     inspectorView: AnyView(inspectorSection),
                     transportView: AnyView(normalTransportStrip)
                 )
@@ -104,7 +157,7 @@ struct PlayerView: View {
         }
         .toolbar {
             ToolbarItemGroup(placement: .navigation) {
-                if !isCompactMode {
+                if !isEffectiveCompactMode {
                     Button {
                         viewModel.openFilesPanel()
                     } label: {
@@ -129,21 +182,22 @@ struct PlayerView: View {
                 Button {
                     toggleCompactMode()
                 } label: {
-                    Image(systemName: isCompactMode ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left")
+                    Image(systemName: isEffectiveCompactMode ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left")
                 }
                 .help("Toggle compact mode (⌃⌘C)")
                 .accessibilityLabel("Toggle compact mode")
                 .accessibilityHint("Switch between compact and normal layouts")
 
-                if !isCompactMode {
+                if !isEffectiveCompactMode {
                     Button {
                         toggleInspectorVisibility()
                     } label: {
-                        Image(systemName: isInspectorVisible ? "info.circle.fill" : "info.circle")
+                        Image(systemName: shouldShowInspectorInNormalLayout ? "info.circle.fill" : "info.circle")
                     }
-                    .help("Toggle inspector (⌥⌘I)")
+                    .help(isInspectorAutoCollapsed ? "Increase window height to show inspector" : "Toggle inspector (⌥⌘I)")
                     .accessibilityLabel("Toggle inspector")
                     .accessibilityHint("Show or hide the inspector section")
+                    .disabled(isInspectorAutoCollapsed)
                 }
             }
         }
@@ -153,6 +207,17 @@ struct PlayerView: View {
                 viewModel.handleKeyDown(event)
             }
             .frame(width: 0, height: 0)
+        )
+        .background(
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear {
+                        updateAvailableContentHeight(proxy.size.height)
+                    }
+                    .onChange(of: proxy.size.height) { _, newValue in
+                        updateAvailableContentHeight(newValue)
+                    }
+            }
         )
         .task {
             viewModel.bootstrapAfterFirstFrame()
@@ -188,7 +253,7 @@ struct PlayerView: View {
             isPlaying: viewModel.isPlaying,
             playbackDuration: viewModel.playbackDuration,
             isImporting: viewModel.isImporting,
-            densityMode: storedDensityMode
+            densityMode: activeDensityMode
         )
     }
 
@@ -211,10 +276,10 @@ struct PlayerView: View {
         )
     }
 
-    private var normalPlaylistSection: some View {
+    private func normalPlaylistSection(minHeight: CGFloat) -> some View {
         playlistCard
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .frame(minHeight: minimumPlaylistSectionHeight)
+            .frame(minHeight: minHeight)
             .accessibilitySortPriority(3)
     }
 
@@ -438,11 +503,16 @@ struct PlayerView: View {
     }
 
     private func toggleCompactMode() {
+        if isAutoCompactFallbackEnabled && !isCompactMode {
+            // Persist explicit user intent when compact is auto-enabled by low window height.
+            isCompactMode = true
+            return
+        }
         isCompactMode.toggle()
     }
 
     private func toggleInspectorVisibility() {
-        guard !isCompactMode else { return }
+        guard !isEffectiveCompactMode else { return }
 
         if reduceMotion {
             isInspectorVisible.toggle()
@@ -451,6 +521,12 @@ struct PlayerView: View {
                 isInspectorVisible.toggle()
             }
         }
+    }
+
+    private func updateAvailableContentHeight(_ nextHeight: CGFloat) {
+        guard nextHeight.isFinite, nextHeight > 0 else { return }
+        guard abs(nextHeight - availableContentHeight) >= contentHeightUpdateThreshold else { return }
+        availableContentHeight = nextHeight
     }
 
     private func revealInFinder(_ fileURL: URL) {
