@@ -349,14 +349,19 @@ extension WindowCoordinator: NSWindowDelegate {
         MainActor.assumeIsolated { [weak self] in
             guard let self else { return frameSize }
 
-            guard self.isCompactModeEnabled, !sender.styleMask.contains(.fullScreen) else {
+            guard !sender.styleMask.contains(.fullScreen) else {
                 return self.proxiedDelegate?.windowWillResize?(sender, to: frameSize) ?? frameSize
             }
 
-            let widthLimits = self.compactFrameWidthLimits(for: sender)
-            let clampedWidth = frameSize.width.clamped(to: widthLimits.min...widthLimits.max)
-            let fixedHeight = self.compactTargetFrameSize(for: sender).height
-            return NSSize(width: clampedWidth, height: fixedHeight)
+            if self.isCompactModeEnabled {
+                let widthLimits = self.compactFrameWidthLimits(for: sender)
+                let clampedWidth = frameSize.width.clamped(to: widthLimits.min...widthLimits.max)
+                let fixedHeight = self.compactTargetFrameSize(for: sender).height
+                return NSSize(width: clampedWidth, height: fixedHeight)
+            }
+
+            // Classic/normal mode is fixed-size and should never collapse into clipped states.
+            return self.normalTargetFrameSize(for: sender)
         }
     }
 
@@ -403,9 +408,8 @@ extension WindowCoordinator: NSWindowDelegate {
     nonisolated func windowDidEndLiveResize(_ notification: Notification) {
         MainActor.assumeIsolated { [weak self] in
             guard let self else { return }
-            if self.isCompactModeEnabled {
-                self.applyCurrentWindowMode(setContentSize: false, animateResize: false)
-            }
+            let shouldReapplyFrame = !self.isCompactModeEnabled
+            self.applyCurrentWindowMode(setContentSize: shouldReapplyFrame, animateResize: false)
             self.proxiedDelegate?.windowDidEndLiveResize?(notification)
         }
     }
