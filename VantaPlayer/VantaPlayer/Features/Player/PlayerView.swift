@@ -15,7 +15,15 @@ struct PlayerView: View {
     @State private var dropTargetActive = false
     @State private var scrubPosition: Double = 0
     @State private var isScrubbing = false
+    @State private var lastNonZeroVolume: Double = 0.8
+    @State private var volumeFadeTask: Task<Void, Never>?
+    @State private var isVolumeFadeInProgress = false
     @State private var sectionVisibilityBeforeCompact: SectionVisibilitySnapshot?
+
+    private let volumeMuteThreshold: Double = 0.0001
+    private let defaultUnmutedVolume: Double = 0.8
+    private let volumeFadeDuration: TimeInterval = 0.5
+    private let volumeFadeSteps: Int = 20
 
     private struct SectionVisibilitySnapshot {
         let inspectorVisible: Bool
@@ -49,8 +57,23 @@ struct PlayerView: View {
     private var volumeBinding: Binding<Double> {
         Binding(
             get: { Double(viewModel.volume) },
-            set: { viewModel.setVolume(Float($0)) }
+            set: { newValue in
+                let clampedValue = min(max(newValue, 0), 1)
+                cancelVolumeFadeAnimation()
+                if clampedValue > volumeMuteThreshold {
+                    lastNonZeroVolume = clampedValue
+                }
+                viewModel.setVolume(Float(clampedValue))
+            }
         )
+    }
+
+    private var isVolumeMuted: Bool {
+        Double(viewModel.volume) <= volumeMuteThreshold
+    }
+
+    private var volumeIconName: String {
+        isVolumeMuted ? "speaker.slash.fill" : "speaker.fill"
     }
 
     private var sectionTransition: AnyTransition {
@@ -92,7 +115,6 @@ struct PlayerView: View {
                     sectionTransition: sectionTransition,
                     showPlaylist: true,
                     showInspector: shouldShowInspectorInNormalLayout,
-                    headerView: AnyView(nowPlayingHeader),
                     inlineErrorView: inlineErrorBannerView,
                     playlistView: AnyView(normalPlaylistSection),
                     inspectorView: AnyView(inspectorSection),
@@ -170,7 +192,13 @@ struct PlayerView: View {
                 isPlaylistVisible = true
             }
             scrubPosition = viewModel.playbackTime
+            if Double(viewModel.volume) > volumeMuteThreshold {
+                lastNonZeroVolume = Double(viewModel.volume)
+            }
             applyCompactModeDefaultsOnAppearIfNeeded()
+        }
+        .onDisappear {
+            cancelVolumeFadeAnimation()
         }
         .onChange(of: isCompactMode) { oldValue, newValue in
             handleCompactModeChange(from: oldValue, to: newValue)
@@ -184,20 +212,32 @@ struct PlayerView: View {
                 scrubPosition = newDuration
             }
         }
+        .onChange(of: viewModel.volume) { _, newValue in
+            let normalized = Double(newValue)
+            if !isVolumeFadeInProgress && normalized > volumeMuteThreshold {
+                lastNonZeroVolume = normalized
+            }
+        }
         .onChange(of: viewModel.selectedTrackID) { _, newValue in
             guard let newValue else { return }
             viewModel.playTrack(with: newValue)
         }
     }
 
-    private var nowPlayingHeader: some View {
-        NowPlayingHeaderView(
-            currentTrack: viewModel.currentTrack,
-            isPlaying: viewModel.isPlaying,
-            playbackDuration: viewModel.playbackDuration,
-            isImporting: viewModel.isImporting,
-            densityMode: activeDensityMode
-        )
+    private var transportSideColumnWidth: CGFloat {
+        max(108, density.volumeSliderWidth + 24)
+    }
+
+    private var transportTitleText: String {
+        viewModel.currentTrack?.title ?? "No Track Selected"
+    }
+
+    private var transportArtistText: String? {
+        guard let artist = viewModel.currentTrack?.artist?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !artist.isEmpty else {
+            return nil
+        }
+        return artist
     }
 
     private var inlineErrorBannerView: AnyView? {
@@ -287,79 +327,110 @@ struct PlayerView: View {
 
     private var normalTransportStrip: some View {
         VStack(spacing: max(6, density.transportSpacing - 2)) {
-            SeekBar(
-                value: scrubPosition,
-                range: seekRange,
-                isEnabled: viewModel.hasTracks,
-                onScrubBegan: {
-                    isScrubbing = true
-                },
-                onScrubChanged: { newValue in
-                    scrubPosition = newValue
-                },
-                onScrubEnded: { finalValue in
-                    scrubPosition = finalValue
-                    isScrubbing = false
-                    viewModel.seek(to: finalValue)
-                }
-            )
-            .help("Seek")
-            .accessibilityLabel("Playback position")
-
             HStack(spacing: density.transportSpacing) {
-                Button {
-                    viewModel.playPrevious()
-                } label: {
-                    Image(systemName: "backward.fill")
-                }
-                .buttonStyle(.borderless)
-                .help("Previous track")
-                .accessibilityLabel("Previous track")
-                .disabled(!viewModel.hasTracks)
-
-                Button {
-                    viewModel.togglePlayPause()
-                } label: {
-                    Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.body.weight(.semibold))
-                        .frame(width: 16)
-                }
-                .buttonStyle(.plain)
-                .help("Play or pause")
-                .accessibilityLabel(viewModel.isPlaying ? "Pause" : "Play")
-                .disabled(!viewModel.hasTracks)
-
-                Button {
-                    viewModel.playNext()
-                } label: {
-                    Image(systemName: "forward.fill")
-                }
-                .buttonStyle(.borderless)
-                .help("Next track")
-                .accessibilityLabel("Next track")
-                .disabled(!viewModel.hasTracks)
-
                 Text(timeString(scrubPosition))
-                    .font(.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .frame(width: density.transportTimeWidth, alignment: .trailing)
-
-                Text(timeString(viewModel.playbackDuration))
                     .font(.caption)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .frame(width: density.transportTimeWidth, alignment: .leading)
 
-                Spacer(minLength: 0)
+                SeekBar(
+                    value: scrubPosition,
+                    range: seekRange,
+                    isEnabled: viewModel.hasTracks,
+                    onScrubBegan: {
+                        isScrubbing = true
+                    },
+                    onScrubChanged: { newValue in
+                        scrubPosition = newValue
+                    },
+                    onScrubEnded: { finalValue in
+                        scrubPosition = finalValue
+                        isScrubbing = false
+                        viewModel.seek(to: finalValue)
+                    }
+                )
+                .help("Seek")
+                .accessibilityLabel("Playback position")
+                .frame(maxWidth: .infinity)
 
-                Image(systemName: "speaker.fill")
+                Text(timeString(viewModel.playbackDuration))
+                    .font(.caption)
+                    .monospacedDigit()
                     .foregroundStyle(.secondary)
+                    .frame(width: density.transportTimeWidth, alignment: .trailing)
+            }
+            .frame(maxWidth: .infinity)
+            .layoutPriority(1)
 
-                Slider(value: volumeBinding, in: 0...1)
-                    .frame(width: density.volumeSliderWidth)
-                    .help("Volume")
-                    .accessibilityLabel("Volume")
+            HStack(spacing: density.transportSpacing) {
+                HStack(spacing: density.transportSpacing) {
+                    Button {
+                        viewModel.playPrevious()
+                    } label: {
+                        Image(systemName: "backward.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Previous track")
+                    .accessibilityLabel("Previous track")
+                    .disabled(!viewModel.hasTracks)
+
+                    Button {
+                        viewModel.togglePlayPause()
+                    } label: {
+                        Image(systemName: viewModel.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 16)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Play or pause")
+                    .accessibilityLabel(viewModel.isPlaying ? "Pause" : "Play")
+                    .disabled(!viewModel.hasTracks)
+
+                    Button {
+                        viewModel.playNext()
+                    } label: {
+                        Image(systemName: "forward.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Next track")
+                    .accessibilityLabel("Next track")
+                    .disabled(!viewModel.hasTracks)
+                }
+                .frame(width: transportSideColumnWidth, alignment: .leading)
+
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(transportTitleText)
+                        .font(.caption.weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .foregroundStyle(viewModel.currentTrack == nil ? .secondary : .primary)
+
+                    if let artist = transportArtistText {
+                        Text("•")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+
+                        Text(artist)
+                            .font(.caption)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(transportArtistText.map { "\(transportTitleText), \($0)" } ?? transportTitleText)
+
+                HStack(spacing: density.transportSpacing) {
+                    volumeToggleButton
+
+                    Slider(value: volumeBinding, in: 0...1)
+                        .frame(width: density.volumeSliderWidth)
+                        .help("Volume")
+                        .accessibilityLabel("Volume")
+                }
+                .frame(width: transportSideColumnWidth, alignment: .trailing)
             }
         }
         .controlSize(density.controlSize)
@@ -431,8 +502,7 @@ struct PlayerView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: density.transportTimeWidth, alignment: .leading)
 
-            Image(systemName: "speaker.fill")
-                .foregroundStyle(.secondary)
+            volumeToggleButton
 
             Slider(value: volumeBinding, in: 0...1)
                 .frame(width: density.volumeSliderWidth)
@@ -495,6 +565,19 @@ struct PlayerView: View {
         return selectedTrack.title
     }
 
+    private var volumeToggleButton: some View {
+        Button {
+            toggleMuteVolume()
+        } label: {
+            Image(systemName: volumeIconName)
+                .foregroundStyle(.secondary)
+                .frame(width: 13)
+        }
+        .buttonStyle(.plain)
+        .help(isVolumeMuted ? "Unmute" : "Mute")
+        .accessibilityLabel(isVolumeMuted ? "Unmute" : "Mute")
+    }
+
     private func applyCompactModeDefaultsOnAppearIfNeeded() {
         guard isCompactMode else { return }
 
@@ -532,6 +615,69 @@ struct PlayerView: View {
                 isInspectorVisible.toggle()
             }
         }
+    }
+
+    private func toggleMuteVolume() {
+        let currentVolume = Double(viewModel.volume)
+
+        if currentVolume > volumeMuteThreshold {
+            lastNonZeroVolume = currentVolume
+            animateVolume(to: 0)
+            return
+        }
+
+        let restoredVolume = lastNonZeroVolume > volumeMuteThreshold
+            ? min(max(lastNonZeroVolume, 0), 1)
+            : defaultUnmutedVolume
+        animateVolume(to: restoredVolume)
+    }
+
+    private func animateVolume(to targetVolume: Double) {
+        let clampedTarget = min(max(targetVolume, 0), 1)
+        cancelVolumeFadeAnimation()
+
+        let startingVolume = Double(viewModel.volume)
+        guard abs(startingVolume - clampedTarget) > volumeMuteThreshold else {
+            viewModel.setVolume(Float(clampedTarget))
+            if clampedTarget > volumeMuteThreshold {
+                lastNonZeroVolume = clampedTarget
+            }
+            return
+        }
+
+        isVolumeFadeInProgress = true
+        let stepDelay = UInt64((volumeFadeDuration / Double(volumeFadeSteps)) * 1_000_000_000)
+
+        volumeFadeTask = Task { @MainActor in
+            defer {
+                isVolumeFadeInProgress = false
+                volumeFadeTask = nil
+            }
+
+            for step in 1...volumeFadeSteps {
+                if Task.isCancelled { return }
+
+                let progress = Double(step) / Double(volumeFadeSteps)
+                let easedProgress = progress * progress * (3 - (2 * progress))
+                let interpolatedVolume = startingVolume + (clampedTarget - startingVolume) * easedProgress
+                viewModel.setVolume(Float(interpolatedVolume))
+
+                if step < volumeFadeSteps {
+                    try? await Task.sleep(nanoseconds: stepDelay)
+                }
+            }
+
+            viewModel.setVolume(Float(clampedTarget))
+            if clampedTarget > volumeMuteThreshold {
+                lastNonZeroVolume = clampedTarget
+            }
+        }
+    }
+
+    private func cancelVolumeFadeAnimation() {
+        volumeFadeTask?.cancel()
+        volumeFadeTask = nil
+        isVolumeFadeInProgress = false
     }
 
     private func revealInFinder(_ fileURL: URL) {
@@ -647,7 +793,6 @@ private struct NormalPlayerLayoutView: View {
     let sectionTransition: AnyTransition
     let showPlaylist: Bool
     let showInspector: Bool
-    let headerView: AnyView
     let inlineErrorView: AnyView?
     let playlistView: AnyView
     let inspectorView: AnyView
@@ -655,9 +800,6 @@ private struct NormalPlayerLayoutView: View {
 
     var body: some View {
         VStack(spacing: density.sectionSpacing) {
-            headerView
-                .accessibilitySortPriority(4)
-
             if let inlineErrorView {
                 inlineErrorView
                     .transition(sectionTransition)
