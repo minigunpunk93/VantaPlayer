@@ -1,6 +1,6 @@
 import Foundation
 
-struct Track: Identifiable, Hashable, Sendable {
+nonisolated struct Track: Identifiable, Hashable, Sendable {
     let id: UUID
     let url: URL
     var title: String

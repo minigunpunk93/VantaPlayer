@@ -7,7 +7,7 @@ final class BookmarksStore: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private var activeAccessCounts: [URL: Int] = [:]
+    private nonisolated(unsafe) var activeAccessCounts: [URL: Int] = [:]
 
     nonisolated func makeBookmark(for url: URL) throws -> Data {
         try normalizedURL(for: url).bookmarkData(

@@ -3,6 +3,9 @@ import Combine
 import Foundation
 
 final class AudioEnginePlayer: ObservableObject {
+    private static let progressUpdateInterval: TimeInterval = 1.0 / 30.0
+    private static let minimumPublishedTimeDelta: TimeInterval = 1.0 / 120.0
+
     @Published private(set) var isPlaying = false
     @Published private(set) var currentTime: TimeInterval = 0
     @Published private(set) var duration: TimeInterval = 0
@@ -136,9 +139,10 @@ final class AudioEnginePlayer: ObservableObject {
     }
 
     private func configureProgressTimer() {
-        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: Self.progressUpdateInterval, repeats: true) { [weak self] _ in
             self?.handleProgressTick()
         }
+        timer.tolerance = Self.progressUpdateInterval * 0.3
         progressTimer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
@@ -202,12 +206,21 @@ final class AudioEnginePlayer: ObservableObject {
     private func handleProgressTick() {
         guard let currentFile else { return }
 
-        let currentFrame = currentPlaybackFrame()
-        pausedFrame = currentFrame
-        currentTime = seconds(for: currentFrame, in: currentFile)
+        let nodeIsPlaying = playerNode.isPlaying
+        if isPlaying != nodeIsPlaying {
+            isPlaying = nodeIsPlaying
+        }
 
-        if isPlaying != playerNode.isPlaying {
-            isPlaying = playerNode.isPlaying
+        guard nodeIsPlaying else { return }
+
+        let currentFrame = currentPlaybackFrame()
+        if pausedFrame != currentFrame {
+            pausedFrame = currentFrame
+        }
+
+        let nextTime = seconds(for: currentFrame, in: currentFile)
+        if abs(nextTime - currentTime) >= Self.minimumPublishedTimeDelta {
+            currentTime = nextTime
         }
     }
 

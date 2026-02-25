@@ -1,7 +1,7 @@
 import Foundation
 
 final class SessionStore: @unchecked Sendable {
-    struct Snapshot: Sendable {
+    nonisolated struct Snapshot: Sendable {
         let tracks: [Track]
         let selectedTrackID: Track.ID?
         let playingTrackID: Track.ID?
@@ -10,11 +10,11 @@ final class SessionStore: @unchecked Sendable {
         let wasPlaying: Bool
     }
 
-    struct QueueSnapshot: Sendable {
+    nonisolated struct QueueSnapshot: Sendable {
         let tracks: [Track]
     }
 
-    struct PlaybackSnapshot: Sendable {
+    nonisolated struct PlaybackSnapshot: Sendable {
         let selectedTrackID: Track.ID?
         let playingTrackID: Track.ID?
         let playbackPositions: [Track.ID: TimeInterval]
@@ -22,7 +22,7 @@ final class SessionStore: @unchecked Sendable {
         let wasPlaying: Bool
     }
 
-    struct RestoredSession: Sendable {
+    nonisolated struct RestoredSession: Sendable {
         let tracks: [Track]
         let selectedTrackID: Track.ID?
         let playingTrackID: Track.ID?
@@ -31,7 +31,7 @@ final class SessionStore: @unchecked Sendable {
         let wasPlaying: Bool
     }
 
-    private struct PersistedTrack: Codable {
+    private nonisolated struct PersistedTrack: Codable {
         let id: UUID
         let path: String
         let bookmarkData: Data?
@@ -43,11 +43,11 @@ final class SessionStore: @unchecked Sendable {
         let isPlayable: Bool
     }
 
-    private struct PersistedQueue: Codable {
+    private nonisolated struct PersistedQueue: Codable {
         let queue: [PersistedTrack]
     }
 
-    private struct PersistedPlayback: Codable {
+    private nonisolated struct PersistedPlayback: Codable {
         let selectedTrackID: UUID?
         let playingTrackID: UUID?
         let playbackPositions: [UUID: TimeInterval]
@@ -56,7 +56,7 @@ final class SessionStore: @unchecked Sendable {
     }
 
     // Legacy combined payload used before split queue/playback persistence.
-    private struct PersistedSession: Codable {
+    private nonisolated struct PersistedSession: Codable {
         let queue: [PersistedTrack]
         let selectedTrackID: UUID?
         let playingTrackID: UUID?
@@ -65,13 +65,13 @@ final class SessionStore: @unchecked Sendable {
         let wasPlaying: Bool
     }
 
-    private enum Keys {
+    private nonisolated enum Keys {
         static let queue = "VantaPlayer.session.queue.v1"
         static let playback = "VantaPlayer.session.playback.v1"
         static let legacySession = "VantaPlayer.session.v1"
     }
 
-    private let defaults: UserDefaults
+    private nonisolated(unsafe) let defaults: UserDefaults
     private let bookmarksStore: BookmarksStore
     private let maxArtworkBytes = 512 * 1024
 

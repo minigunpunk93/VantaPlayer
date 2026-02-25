@@ -10,6 +10,8 @@ import MediaPlayer
 
 @MainActor
 final class PlayerViewModel: ObservableObject {
+    private static let playbackTimePublishStep: TimeInterval = 1.0 / 20.0
+
     struct InlineError: Identifiable {
         let id = UUID()
         let message: String
@@ -33,6 +35,11 @@ final class PlayerViewModel: ObservableObject {
     @Published private(set) var isRestoringSession = false
     @Published private(set) var inlineError: InlineError?
     @Published private(set) var hasBootstrapped = false
+    @Published private(set) var isPlaying = false
+    @Published private(set) var playbackTime: TimeInterval = 0
+    @Published private(set) var volume: Float = 0.8
+
+    @Published private var activePlaybackDuration: TimeInterval = 0
 
     private var preferredVolume: Float = 0.8
     private var playbackPositions: [Track.ID: TimeInterval] = [:]
@@ -74,22 +81,10 @@ final class PlayerViewModel: ObservableObject {
         sessionStore = SessionStore(bookmarksStore: bookmarksStore)
     }
 
-    var isPlaying: Bool {
-        audioPlayer?.isPlaying ?? false
-    }
-
-    var playbackTime: TimeInterval {
-        audioPlayer?.currentTime ?? 0
-    }
-
     var playbackDuration: TimeInterval {
-        let activeDuration = audioPlayer?.duration ?? 0
+        let activeDuration = activePlaybackDuration
         let selectedDuration = currentTrack?.duration ?? 0
         return max(activeDuration, selectedDuration)
-    }
-
-    var volume: Float {
-        audioPlayer?.volume ?? preferredVolume
     }
 
     var currentTrack: Track? {
@@ -309,6 +304,7 @@ final class PlayerViewModel: ObservableObject {
 
     func setVolume(_ value: Float) {
         preferredVolume = max(0, min(value, 1))
+        volume = preferredVolume
         audioPlayer?.setVolume(preferredVolume)
         schedulePlaybackSave()
     }
@@ -403,34 +399,56 @@ final class PlayerViewModel: ObservableObject {
 
         let player = AudioEnginePlayer()
         player.setVolume(preferredVolume)
+        volume = preferredVolume
+        isPlaying = player.isPlaying
+        playbackTime = player.currentTime
+        activePlaybackDuration = player.duration
         player.onPlaybackEnded = { [weak self] in
             Task { @MainActor in
                 self?.playNext()
             }
         }
 
-        player.objectWillChange
-            .sink { [weak self] _ in
-                self?.objectWillChange.send()
-            }
-            .store(in: &playerCancellables)
-
         player.$currentTime
             .receive(on: RunLoop.main)
             .sink { [weak self, weak player] currentTime in
                 guard let self else { return }
-                if let trackID = player?.currentTrackID {
-                    playbackPositions[trackID] = currentTime
+                if abs(self.playbackTime - currentTime) >= Self.playbackTimePublishStep {
+                    self.playbackTime = currentTime
                 }
-                maybePersistPlaybackPosition(currentTime: currentTime)
-                refreshNowPlayingInfo()
+                if let trackID = player?.currentTrackID {
+                    self.playbackPositions[trackID] = currentTime
+                }
+                self.maybePersistPlaybackPosition(currentTime: currentTime)
+                self.refreshNowPlayingInfo()
+            }
+            .store(in: &playerCancellables)
+
+        player.$duration
+            .receive(on: RunLoop.main)
+            .sink { [weak self] duration in
+                self?.activePlaybackDuration = duration
+            }
+            .store(in: &playerCancellables)
+
+        player.$volume
+            .receive(on: RunLoop.main)
+            .sink { [weak self] volume in
+                guard let self else { return }
+                if self.volume != volume {
+                    self.volume = volume
+                }
             }
             .store(in: &playerCancellables)
 
         player.$isPlaying
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in
-                self?.refreshNowPlayingInfo(force: true)
+            .sink { [weak self] isPlaying in
+                guard let self else { return }
+                if self.isPlaying != isPlaying {
+                    self.isPlaying = isPlaying
+                }
+                self.refreshNowPlayingInfo(force: true)
             }
             .store(in: &playerCancellables)
 
@@ -583,6 +601,7 @@ final class PlayerViewModel: ObservableObject {
 
         playbackPositions = restoredSession.playbackPositions
         preferredVolume = max(0, min(restoredSession.volume, 1))
+        volume = preferredVolume
         selectedTrackID = restoredSession.selectedTrackID ?? tracks.first?.id
 
         let player = ensureAudioStack()

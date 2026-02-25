@@ -21,22 +21,6 @@ struct PlayerView: View {
         let inspectorVisible: Bool
     }
 
-    private static let minuteFormatter: DateComponentsFormatter = {
-        let formatter = DateComponentsFormatter()
-        formatter.allowedUnits = [.minute, .second]
-        formatter.unitsStyle = .positional
-        formatter.zeroFormattingBehavior = [.pad]
-        return formatter
-    }()
-
-    private static let hourFormatter: DateComponentsFormatter = {
-        let formatter = DateComponentsFormatter()
-        formatter.allowedUnits = [.hour, .minute, .second]
-        formatter.unitsStyle = .positional
-        formatter.zeroFormattingBehavior = [.pad]
-        return formatter
-    }()
-
     private var storedDensityMode: DensityMode {
         DensityMode(rawValue: densityModeRawValue) ?? .comfortable
     }
@@ -476,11 +460,19 @@ struct PlayerView: View {
     private func timeString(_ seconds: TimeInterval) -> String {
         guard seconds.isFinite, seconds > 0 else { return "0:00" }
 
-        if seconds >= 3600 {
-            return Self.hourFormatter.string(from: seconds) ?? "0:00"
+        let clampedSeconds = max(0, Int(seconds))
+        let hours = clampedSeconds / 3600
+        let minutes = (clampedSeconds % 3600) / 60
+        let remainingSeconds = clampedSeconds % 60
+
+        let paddedMinutes = minutes < 10 ? "0\(minutes)" : "\(minutes)"
+        let paddedSeconds = remainingSeconds < 10 ? "0\(remainingSeconds)" : "\(remainingSeconds)"
+
+        if hours > 0 {
+            return "\(hours):\(paddedMinutes):\(paddedSeconds)"
         }
 
-        return Self.minuteFormatter.string(from: seconds) ?? "0:00"
+        return "\(minutes):\(paddedSeconds)"
     }
 }
 
