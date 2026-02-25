@@ -134,7 +134,7 @@ final class WindowCoordinator: NSObject, ObservableObject {
 
     private func applyNormalMode(on window: NSWindow, setContentSize: Bool, animateResize: Bool) {
         let targetFrameSize = normalTargetFrameSize(for: window)
-        let minimumFrameSize = normalMinimumFrameSize(for: window)
+        let minimumFrameHeight = normalMinimumFrameSize(for: window).height
 
         if setContentSize {
             resizeWindowTopAnchored(
@@ -144,7 +144,11 @@ final class WindowCoordinator: NSObject, ObservableObject {
             )
         }
 
-        lockNormalResizeLimits(on: window, minimumFrameSize: minimumFrameSize)
+        lockNormalResizeLimits(
+            on: window,
+            fixedFrameWidth: targetFrameSize.width,
+            minimumFrameHeight: minimumFrameHeight
+        )
     }
 
     private func relaxResizeLimitsForTransition(on window: NSWindow) {
@@ -157,13 +161,16 @@ final class WindowCoordinator: NSObject, ObservableObject {
         }
     }
 
-    private func lockNormalResizeLimits(on window: NSWindow, minimumFrameSize: NSSize) {
-        if !approximatelyEqual(window.minSize, minimumFrameSize) {
-            window.minSize = minimumFrameSize
+    private func lockNormalResizeLimits(on window: NSWindow, fixedFrameWidth: CGFloat, minimumFrameHeight: CGFloat) {
+        let normalMinSize = NSSize(width: fixedFrameWidth, height: minimumFrameHeight)
+        let normalMaxSize = NSSize(width: fixedFrameWidth, height: unconstrainedSize.height)
+
+        if !approximatelyEqual(window.minSize, normalMinSize) {
+            window.minSize = normalMinSize
         }
 
-        if !approximatelyEqual(window.maxSize, unconstrainedSize) {
-            window.maxSize = unconstrainedSize
+        if !approximatelyEqual(window.maxSize, normalMaxSize) {
+            window.maxSize = normalMaxSize
         }
     }
 
@@ -340,14 +347,22 @@ extension WindowCoordinator: NSWindowDelegate {
         MainActor.assumeIsolated { [weak self] in
             guard let self else { return frameSize }
 
-            guard self.isCompactModeEnabled, !sender.styleMask.contains(.fullScreen) else {
+            guard !sender.styleMask.contains(.fullScreen) else {
                 return self.proxiedDelegate?.windowWillResize?(sender, to: frameSize) ?? frameSize
             }
 
-            let widthLimits = self.compactFrameWidthLimits(for: sender)
-            let clampedWidth = frameSize.width.clamped(to: widthLimits.min...widthLimits.max)
-            let fixedHeight = self.compactTargetFrameSize(for: sender).height
-            return NSSize(width: clampedWidth, height: fixedHeight)
+            if self.isCompactModeEnabled {
+                let widthLimits = self.compactFrameWidthLimits(for: sender)
+                let clampedWidth = frameSize.width.clamped(to: widthLimits.min...widthLimits.max)
+                let fixedHeight = self.compactTargetFrameSize(for: sender).height
+                return NSSize(width: clampedWidth, height: fixedHeight)
+            }
+
+            // Keep classic mode at a fixed width; only height remains resizable.
+            let fixedWidth = self.normalTargetFrameSize(for: sender).width
+            let minimumHeight = self.normalMinimumFrameSize(for: sender).height
+            let clampedHeight = max(frameSize.height, minimumHeight)
+            return NSSize(width: fixedWidth, height: clampedHeight)
         }
     }
 

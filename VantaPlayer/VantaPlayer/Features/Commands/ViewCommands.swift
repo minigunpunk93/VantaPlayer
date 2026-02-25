@@ -17,11 +17,6 @@ struct ViewCommands: Commands {
         CommandGroup(after: .sidebar) {
             Divider()
 
-            Button("Toggle Compact Mode") {
-                isCompactMode.toggle()
-            }
-            .keyboardShortcut("c", modifiers: [.control, .command])
-
             Button("Toggle Inspector") {
                 guard !isCompactMode else { return }
                 isInspectorVisible.toggle()

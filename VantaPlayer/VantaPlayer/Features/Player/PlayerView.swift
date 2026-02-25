@@ -25,11 +25,9 @@ struct PlayerView: View {
     private enum AdaptiveNormalLayoutMode {
         case full
         case inspectorCollapsed
-        case compactFallback
     }
 
     private let inspectorCollapseHeightThreshold: CGFloat = 560
-    private let compactFallbackHeightThreshold: CGFloat = 430
     private let contentHeightUpdateThreshold: CGFloat = 1
 
     private var storedDensityMode: DensityMode {
@@ -37,12 +35,8 @@ struct PlayerView: View {
     }
 
     private var adaptiveNormalLayoutMode: AdaptiveNormalLayoutMode {
-        guard !isCompactMode else { return .compactFallback }
+        guard !isCompactMode else { return .full }
         guard availableContentHeight.isFinite, availableContentHeight > 0 else { return .full }
-
-        if availableContentHeight <= compactFallbackHeightThreshold {
-            return .compactFallback
-        }
 
         if availableContentHeight <= inspectorCollapseHeightThreshold {
             return .inspectorCollapsed
@@ -51,12 +45,8 @@ struct PlayerView: View {
         return .full
     }
 
-    private var isAutoCompactFallbackEnabled: Bool {
-        !isCompactMode && adaptiveNormalLayoutMode == .compactFallback
-    }
-
     private var isEffectiveCompactMode: Bool {
-        isCompactMode || isAutoCompactFallbackEnabled
+        isCompactMode
     }
 
     private var isInspectorAutoCollapsed: Bool {
@@ -184,7 +174,7 @@ struct PlayerView: View {
                 } label: {
                     Image(systemName: isEffectiveCompactMode ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left")
                 }
-                .help("Toggle compact mode (⌃⌘C)")
+                .help("Toggle compact mode")
                 .accessibilityLabel("Toggle compact mode")
                 .accessibilityHint("Switch between compact and normal layouts")
 
@@ -503,11 +493,6 @@ struct PlayerView: View {
     }
 
     private func toggleCompactMode() {
-        if isAutoCompactFallbackEnabled && !isCompactMode {
-            // Persist explicit user intent when compact is auto-enabled by low window height.
-            isCompactMode = true
-            return
-        }
         isCompactMode.toggle()
     }
 
