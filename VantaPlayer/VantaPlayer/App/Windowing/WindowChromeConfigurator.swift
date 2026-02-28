@@ -39,7 +39,7 @@ final class WindowChromeConfigurator {
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
-        window.isMovableByWindowBackground = true
+        window.isMovableByWindowBackground = false
         if let closeButton = window.standardWindowButton(.closeButton) {
             closeButton.isHidden = false
             closeButton.target = NSApp

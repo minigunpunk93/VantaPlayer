@@ -42,7 +42,6 @@ final class PlayerViewModel: ObservableObject {
     @Published private var activePlaybackDuration: TimeInterval = 0
 
     private var preferredVolume: Float = 0.8
-    private var playbackPositions: [Track.ID: TimeInterval] = [:]
     private var trackIndexByID: [Track.ID: Int] = [:]
 
     private let bookmarksStore = BookmarksStore()
@@ -58,7 +57,6 @@ final class PlayerViewModel: ObservableObject {
     private var shouldAutoplayOnImport = false
     private var didAutoplayDuringImport = false
     private var activeImportGeneration = 0
-    private var lastPersistedSecond = -1
 
     #if canImport(MediaPlayer)
     private var remoteCommandsConfigured = false
@@ -171,8 +169,13 @@ final class PlayerViewModel: ObservableObject {
                 if Task.isCancelled { break }
                 guard generation == activeImportGeneration else { return }
 
+                let bookmarkData = prepareImportBookmark(from: url)
+
                 let track = await Task.detached(priority: .userInitiated) {
-                    await TrackImportWorker.makeTrack(from: url)
+                    await TrackImportWorker.makeTrack(
+                        from: url,
+                        bookmarkData: bookmarkData
+                    )
                 }.value
 
                 if appendImportedTrack(track) {
@@ -232,8 +235,13 @@ final class PlayerViewModel: ObservableObject {
                     label: "Importing \(importedCount)/\(discoveredCount)"
                 )
 
+                let bookmarkData = prepareImportBookmark(from: url)
+
                 let track = await Task.detached(priority: .userInitiated) {
-                    await TrackImportWorker.makeTrack(from: url)
+                    await TrackImportWorker.makeTrack(
+                        from: url,
+                        bookmarkData: bookmarkData
+                    )
                 }.value
 
                 if appendImportedTrack(track) {
@@ -265,6 +273,34 @@ final class PlayerViewModel: ObservableObject {
         scheduleQueueSave()
     }
 
+    func moveTrack(id: Track.ID, relativeTo targetID: Track.ID, placeAfter: Bool, persist: Bool = true) {
+        guard let targetIndex = trackIndex(for: targetID) else { return }
+        let destinationIndex = targetIndex + (placeAfter ? 1 : 0)
+        moveTrack(id: id, to: destinationIndex, persist: persist)
+    }
+
+    func moveTrack(id: Track.ID, to destinationIndex: Int, persist: Bool = true) {
+        guard let sourceIndex = trackIndex(for: id) else { return }
+
+        let clampedDestination = max(0, min(destinationIndex, tracks.count))
+        if sourceIndex == clampedDestination || sourceIndex + 1 == clampedDestination {
+            return
+        }
+
+        let movingTrack = tracks.remove(at: sourceIndex)
+        let insertionIndex = sourceIndex < clampedDestination ? clampedDestination - 1 : clampedDestination
+        tracks.insert(movingTrack, at: insertionIndex)
+
+        rebuildTrackIndexCache()
+        if persist {
+            scheduleQueueSave()
+        }
+    }
+
+    func persistTrackOrder() {
+        scheduleQueueSave()
+    }
+
     func playTrack(with id: Track.ID) {
         playTrack(with: id, autoplay: true, explicitStartTime: nil)
     }
@@ -286,6 +322,21 @@ final class PlayerViewModel: ObservableObject {
         } else {
             playTrack(with: targetTrack.id)
         }
+    }
+
+    func playSelectedTrack() {
+        guard let targetTrack = selectedTrackForPlayback() else { return }
+
+        if audioPlayer?.currentTrackID == targetTrack.id {
+            if !isPlaying {
+                ensureAudioStack().play()
+                refreshNowPlayingInfo(force: true)
+                schedulePlaybackSave()
+            }
+            return
+        }
+
+        playTrack(with: targetTrack.id)
     }
 
     func playNext() {
@@ -321,6 +372,11 @@ final class PlayerViewModel: ObservableObject {
         setVolume(volume + delta)
     }
 
+    func removeSelectedTrack() {
+        guard let selectedTrackID else { return }
+        removeTrack(id: selectedTrackID)
+    }
+
     func removeTrack(id: Track.ID) {
         guard let removingIndex = trackIndex(for: id) else { return }
 
@@ -330,7 +386,6 @@ final class PlayerViewModel: ObservableObject {
 
         tracks.remove(at: removingIndex)
         rebuildTrackIndexCache()
-        playbackPositions.removeValue(forKey: id)
         bookmarksStore.endAccess(to: removedTrack.url)
         #if canImport(MediaPlayer)
         nowPlayingArtworkCache.removeValue(forKey: id)
@@ -383,6 +438,18 @@ final class PlayerViewModel: ObservableObject {
         case 49 where modifiers.isEmpty:
             togglePlayPause()
             return nil
+        case 36 where modifiers.isEmpty:
+            playSelectedTrack()
+            return nil
+        case 76 where modifiers.isEmpty:
+            playSelectedTrack()
+            return nil
+        case 51 where modifiers.isEmpty:
+            removeSelectedTrack()
+            return nil
+        case 117 where modifiers.isEmpty:
+            removeSelectedTrack()
+            return nil
         case 123 where modifiers.isEmpty:
             seek(by: -5)
             return nil
@@ -419,15 +486,11 @@ final class PlayerViewModel: ObservableObject {
 
         player.$currentTime
             .receive(on: RunLoop.main)
-            .sink { [weak self, weak player] currentTime in
+            .sink { [weak self] currentTime in
                 guard let self else { return }
                 if abs(self.playbackTime - currentTime) >= Self.playbackTimePublishStep {
                     self.playbackTime = currentTime
                 }
-                if let trackID = player?.currentTrackID {
-                    self.playbackPositions[trackID] = currentTime
-                }
-                self.maybePersistPlaybackPosition(currentTime: currentTime)
                 self.refreshNowPlayingInfo()
             }
             .store(in: &playerCancellables)
@@ -478,19 +541,28 @@ final class PlayerViewModel: ObservableObject {
         selectedTrackID = id
         inlineError = nil
 
-        guard tracks[index].isPlayable else {
-            presentError("“\(tracks[index].title)” can’t be played.", trackID: id)
-            return
+        if tracks[index].bookmarkData == nil {
+            let didStartScope = bookmarksStore.beginAccess(to: tracks[index].url)
+            tracks[index].bookmarkData = try? bookmarksStore.makeBookmark(for: tracks[index].url)
+            if didStartScope {
+                bookmarksStore.endAccess(to: tracks[index].url)
+            }
+            if tracks[index].bookmarkData != nil {
+                scheduleQueueSave()
+            }
         }
 
         let player = ensureAudioStack()
-        let startTime = explicitStartTime ?? playbackPositions[id] ?? 0
+        let startTime = explicitStartTime ?? 0
 
         do {
             try player.loadTrack(tracks[index], autoplay: autoplay, startTime: startTime)
-            playbackPositions[id] = player.currentTime
 
             var didMutateQueue = false
+            if !tracks[index].isPlayable {
+                tracks[index].isPlayable = true
+                didMutateQueue = true
+            }
             if tracks[index].duration == nil && player.duration > 0 {
                 tracks[index].duration = player.duration
                 didMutateQueue = true
@@ -509,8 +581,16 @@ final class PlayerViewModel: ObservableObject {
             let wasPlayable = tracks[index].isPlayable
             let previousReason = tracks[index].unplayableReason
             tracks[index].isPlayable = false
-            tracks[index].unplayableReason = "Failed to decode audio"
-            presentError("Couldn’t decode “\(tracks[index].title)”.", trackID: id)
+
+            let failureReason = playbackFailureReason(for: error)
+            switch failureReason {
+            case .permissionDenied:
+                tracks[index].unplayableReason = "Permission denied"
+                presentError("No permission to access “\(tracks[index].title)”. Re-import this file.", trackID: id)
+            case .decodeFailed:
+                tracks[index].unplayableReason = "Failed to decode audio"
+                presentError("Couldn’t decode “\(tracks[index].title)”.", trackID: id)
+            }
             if wasPlayable || previousReason != tracks[index].unplayableReason {
                 scheduleQueueSave()
             }
@@ -569,9 +649,6 @@ final class PlayerViewModel: ObservableObject {
         }
 
         var track = incomingTrack
-        if track.bookmarkData == nil {
-            track.bookmarkData = try? bookmarksStore.makeBookmark(for: track.url)
-        }
         _ = bookmarksStore.beginAccess(to: track.url)
 
         tracks.append(track)
@@ -598,16 +675,43 @@ final class PlayerViewModel: ObservableObject {
         isRestoringSession = false
         guard let restoredSession else { return }
 
-        tracks = restoredSession.tracks
+        var droppedMissingBookmarkCount = 0
+        tracks = restoredSession.tracks.filter { track in
+            if track.bookmarkData == nil {
+                droppedMissingBookmarkCount += 1
+                return false
+            }
+            return true
+        }
         rebuildTrackIndexCache()
-        for track in tracks {
-            _ = bookmarksStore.beginAccess(to: track.url)
+        var firstDeniedTrackID: Track.ID?
+        for index in tracks.indices {
+            let didStartScope = bookmarksStore.beginAccess(to: tracks[index].url)
+            if didStartScope { continue }
+
+            tracks[index].isPlayable = false
+            tracks[index].unplayableReason = "Permission denied"
+            if firstDeniedTrackID == nil {
+                firstDeniedTrackID = tracks[index].id
+            }
+        }
+        if let deniedTrackID = firstDeniedTrackID,
+           let deniedTrack = tracks.first(where: { $0.id == deniedTrackID }) {
+            presentError("No permission to access “\(deniedTrack.title)”.", trackID: deniedTrackID)
+        } else if droppedMissingBookmarkCount > 0 {
+            let noun = droppedMissingBookmarkCount == 1 ? "track" : "tracks"
+            presentError(
+                "Removed \(droppedMissingBookmarkCount) \(noun) with missing permissions. Re-import them.",
+                trackID: nil
+            )
+        }
+        if droppedMissingBookmarkCount > 0 {
+            scheduleQueueSave()
         }
         #if canImport(MediaPlayer)
         nowPlayingArtworkCache.removeAll(keepingCapacity: true)
         #endif
 
-        playbackPositions = restoredSession.playbackPositions
         preferredVolume = max(0, min(restoredSession.volume, 1))
         volume = preferredVolume
         selectedTrackID = restoredSession.selectedTrackID ?? tracks.first?.id
@@ -618,8 +722,7 @@ final class PlayerViewModel: ObservableObject {
         let anchorTrackID = restoredSession.playingTrackID ?? selectedTrackID
         if let anchorTrackID,
            let anchorIndex = trackIndex(for: anchorTrackID) {
-            let startTime = playbackPositions[anchorTrackID] ?? 0
-            playTrack(with: tracks[anchorIndex].id, autoplay: restoredSession.wasPlaying, explicitStartTime: startTime)
+            playTrack(with: tracks[anchorIndex].id, autoplay: restoredSession.wasPlaying, explicitStartTime: 0)
         } else {
             refreshNowPlayingInfo(force: true)
         }
@@ -683,6 +786,18 @@ final class PlayerViewModel: ObservableObject {
         return firstResponder is NSTextField
     }
 
+    private func prepareImportBookmark(from url: URL) -> Data? {
+        let sourceURL = url
+        let didStartScope = bookmarksStore.beginAccess(to: sourceURL)
+        defer {
+            if didStartScope {
+                bookmarksStore.endAccess(to: sourceURL)
+            }
+        }
+
+        return try? bookmarksStore.makeBookmark(for: sourceURL)
+    }
+
     private func filteredImportURLs(from urls: [URL]) -> [URL] {
         var uniqueURLs = Set<URL>()
         let existingURLs = Set(tracks.map { normalizedURL($0.url) })
@@ -703,14 +818,38 @@ final class PlayerViewModel: ObservableObject {
             }
 
             uniqueURLs.insert(normalized)
-            accepted.append(normalized)
+            accepted.append(candidate)
         }
 
         return accepted
     }
 
     private func normalizedURL(_ url: URL) -> URL {
-        url.standardizedFileURL.resolvingSymlinksInPath()
+        url.standardizedFileURL
+    }
+
+    private enum PlaybackFailureReason {
+        case permissionDenied
+        case decodeFailed
+    }
+
+    private func playbackFailureReason(for error: Error) -> PlaybackFailureReason {
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain,
+           nsError.code == NSFileReadNoPermissionError || nsError.code == NSFileNoSuchFileError {
+            return .permissionDenied
+        }
+
+        if nsError.domain == NSPOSIXErrorDomain,
+           nsError.code == EACCES {
+            return .permissionDenied
+        }
+
+        if nsError.localizedDescription.lowercased().contains("permission") {
+            return .permissionDenied
+        }
+
+        return .decodeFailed
     }
 
     private func trackIndex(for id: Track.ID) -> Int? {
@@ -730,13 +869,6 @@ final class PlayerViewModel: ObservableObject {
         for (index, track) in tracks.enumerated() {
             trackIndexByID[track.id] = index
         }
-    }
-
-    private func maybePersistPlaybackPosition(currentTime: TimeInterval) {
-        let roundedSecond = Int(currentTime)
-        guard roundedSecond != lastPersistedSecond else { return }
-        lastPersistedSecond = roundedSecond
-        schedulePlaybackSave()
     }
 
     private func scheduleQueueSave() {
@@ -762,15 +894,10 @@ final class PlayerViewModel: ObservableObject {
     }
 
     private func makePlaybackSnapshot() -> SessionStore.PlaybackSnapshot {
-        var positions = playbackPositions
-        if let currentTrackID = audioPlayer?.currentTrackID {
-            positions[currentTrackID] = audioPlayer?.currentTime ?? positions[currentTrackID] ?? 0
-        }
-
         return SessionStore.PlaybackSnapshot(
             selectedTrackID: selectedTrackID,
             playingTrackID: audioPlayer?.currentTrackID ?? selectedTrackID,
-            playbackPositions: positions,
+            playbackPositions: [:],
             volume: volume,
             wasPlaying: isPlaying
         )
@@ -888,10 +1015,11 @@ final class PlayerViewModel: ObservableObject {
 }
 
 private enum TrackImportWorker {
-    nonisolated static func makeTrack(from url: URL) async -> Track {
-        let normalized = url.standardizedFileURL.resolvingSymlinksInPath()
+    nonisolated static func makeTrack(from url: URL, bookmarkData: Data?) async -> Track {
+        let sourceURL = url
+        let normalized = url.standardizedFileURL
         let fallbackTitle = normalized.deletingPathExtension().lastPathComponent
-        let asset = AVURLAsset(url: normalized)
+        let asset = AVURLAsset(url: sourceURL)
 
         do {
             async let durationTask = asset.load(.duration)
@@ -916,25 +1044,25 @@ private enum TrackImportWorker {
             let artworkData = await artworkTask
 
             return Track(
-                url: normalized,
+                url: sourceURL,
                 title: title,
                 artist: artist,
                 album: album,
                 duration: resolvedDuration,
                 artworkData: artworkData,
-                bookmarkData: nil,
+                bookmarkData: bookmarkData,
                 isPlayable: isPlayable,
                 unplayableReason: isPlayable ? nil : "Unsupported codec or format"
             )
         } catch {
             return Track(
-                url: normalized,
+                url: sourceURL,
                 title: fallbackTitle,
                 artist: nil,
                 album: nil,
                 duration: nil,
                 artworkData: nil,
-                bookmarkData: nil,
+                bookmarkData: bookmarkData,
                 isPlayable: false,
                 unplayableReason: "Metadata read failed"
             )
@@ -947,7 +1075,7 @@ private enum TrackImportWorker {
         excluding existing: Set<URL>
     ) -> AsyncStream<URL> {
         func normalize(_ url: URL) -> URL {
-            url.standardizedFileURL.resolvingSymlinksInPath()
+            url.standardizedFileURL
         }
 
         let normalizedRoot = normalize(rootURL)

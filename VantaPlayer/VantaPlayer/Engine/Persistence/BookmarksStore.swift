@@ -7,10 +7,11 @@ final class BookmarksStore: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private nonisolated(unsafe) var activeAccessCounts: [URL: Int] = [:]
+    private nonisolated(unsafe) var activeAccessCounts: [String: Int] = [:]
+    private nonisolated(unsafe) var activeScopedURLs: [String: URL] = [:]
 
     nonisolated func makeBookmark(for url: URL) throws -> Data {
-        try normalizedURL(for: url).bookmarkData(
+        try scopedURL(for: url).bookmarkData(
             options: [.withSecurityScope],
             includingResourceValuesForKeys: nil,
             relativeTo: nil
@@ -29,52 +30,60 @@ final class BookmarksStore: @unchecked Sendable {
             return nil
         }
 
-        let normalized = normalizedURL(for: resolvedURL)
+        let resolved = scopedURL(for: resolvedURL)
         let refreshedBookmarkData: Data?
 
         if isStale {
-            refreshedBookmarkData = try? makeBookmark(for: normalized)
+            refreshedBookmarkData = try? makeBookmark(for: resolved)
         } else {
             refreshedBookmarkData = bookmarkData
         }
 
-        return ResolvedBookmark(url: normalized, bookmarkData: refreshedBookmarkData)
+        return ResolvedBookmark(url: resolved, bookmarkData: refreshedBookmarkData)
     }
 
     @discardableResult
     nonisolated func beginAccess(to url: URL) -> Bool {
-        let normalized = normalizedURL(for: url)
-        let started = normalized.startAccessingSecurityScopedResource()
+        let scoped = scopedURL(for: url)
+        let key = accessKey(for: scoped)
+        let started = scoped.startAccessingSecurityScopedResource()
         guard started else { return false }
 
         lock.lock()
-        activeAccessCounts[normalized, default: 0] += 1
+        activeAccessCounts[key, default: 0] += 1
+        activeScopedURLs[key] = scoped
         lock.unlock()
 
         return true
     }
 
     nonisolated func endAccess(to url: URL) {
-        let normalized = normalizedURL(for: url)
+        let key = accessKey(for: url)
         var shouldStop = false
+        var scopedURLToStop: URL?
 
         lock.lock()
-        if let count = activeAccessCounts[normalized] {
+        if let count = activeAccessCounts[key] {
             if count <= 1 {
-                activeAccessCounts.removeValue(forKey: normalized)
+                activeAccessCounts.removeValue(forKey: key)
+                scopedURLToStop = activeScopedURLs.removeValue(forKey: key)
                 shouldStop = true
             } else {
-                activeAccessCounts[normalized] = count - 1
+                activeAccessCounts[key] = count - 1
             }
         }
         lock.unlock()
 
         if shouldStop {
-            normalized.stopAccessingSecurityScopedResource()
+            (scopedURLToStop ?? scopedURL(for: url)).stopAccessingSecurityScopedResource()
         }
     }
 
-    private nonisolated func normalizedURL(for url: URL) -> URL {
-        url.standardizedFileURL.resolvingSymlinksInPath()
+    private nonisolated func scopedURL(for url: URL) -> URL {
+        url
+    }
+
+    private nonisolated func accessKey(for url: URL) -> String {
+        url.standardizedFileURL.path
     }
 }

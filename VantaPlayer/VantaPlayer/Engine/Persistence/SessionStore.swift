@@ -86,7 +86,7 @@ final class SessionStore: @unchecked Sendable {
             snapshot: PlaybackSnapshot(
                 selectedTrackID: snapshot.selectedTrackID,
                 playingTrackID: snapshot.playingTrackID,
-                playbackPositions: snapshot.playbackPositions,
+                playbackPositions: [:],
                 volume: snapshot.volume,
                 wasPlaying: snapshot.wasPlaying
             )
@@ -106,7 +106,7 @@ final class SessionStore: @unchecked Sendable {
         let state = PersistedPlayback(
             selectedTrackID: snapshot.selectedTrackID,
             playingTrackID: snapshot.playingTrackID,
-            playbackPositions: snapshot.playbackPositions,
+            playbackPositions: [:],
             volume: max(0, min(snapshot.volume, 1)),
             wasPlaying: snapshot.wasPlaying
         )
@@ -133,7 +133,7 @@ final class SessionStore: @unchecked Sendable {
             snapshot: PlaybackSnapshot(
                 selectedTrackID: legacyRestored.selectedTrackID,
                 playingTrackID: legacyRestored.playingTrackID,
-                playbackPositions: legacyRestored.playbackPositions,
+                playbackPositions: [:],
                 volume: legacyRestored.volume,
                 wasPlaying: legacyRestored.wasPlaying
             )
@@ -170,7 +170,7 @@ final class SessionStore: @unchecked Sendable {
         let playbackState = PersistedPlayback(
             selectedTrackID: legacyState.selectedTrackID,
             playingTrackID: legacyState.playingTrackID,
-            playbackPositions: legacyState.playbackPositions,
+            playbackPositions: [:],
             volume: legacyState.volume,
             wasPlaying: legacyState.wasPlaying
         )
@@ -190,9 +190,7 @@ final class SessionStore: @unchecked Sendable {
         let playingTrackID = playbackState?.playingTrackID.flatMap {
             validIDs.contains($0) ? $0 : nil
         }
-        let playbackPositions = (playbackState?.playbackPositions ?? [:]).filter {
-            validIDs.contains($0.key)
-        }
+        let playbackPositions: [Track.ID: TimeInterval] = [:]
 
         return RestoredSession(
             tracks: restoredTracks,
@@ -215,7 +213,9 @@ final class SessionStore: @unchecked Sendable {
     }
 
     private nonisolated func persistedTrack(from track: Track) -> PersistedTrack? {
-        let bookmarkData = track.bookmarkData ?? (try? bookmarksStore.makeBookmark(for: track.url))
+        guard let bookmarkData = track.bookmarkData ?? (try? bookmarksStore.makeBookmark(for: track.url)) else {
+            return nil
+        }
         let trimmedArtwork = track.artworkData.flatMap { data -> Data? in
             data.count <= maxArtworkBytes ? data : nil
         }
@@ -234,32 +234,31 @@ final class SessionStore: @unchecked Sendable {
     }
 
     private nonisolated func restoredTrack(from track: PersistedTrack) -> Track? {
-        let resolvedURL: URL
+        let restoredURL: URL
         var resolvedBookmarkData = track.bookmarkData
 
         if let bookmarkData = track.bookmarkData,
            let resolvedBookmark = bookmarksStore.resolveBookmark(bookmarkData) {
-            resolvedURL = resolvedBookmark.url
+            restoredURL = resolvedBookmark.url
             resolvedBookmarkData = resolvedBookmark.bookmarkData
         } else {
-            resolvedURL = URL(fileURLWithPath: track.path)
+            restoredURL = URL(fileURLWithPath: track.path).standardizedFileURL
         }
 
-        let normalizedURL = resolvedURL.standardizedFileURL.resolvingSymlinksInPath()
-        guard FileManager.default.fileExists(atPath: normalizedURL.path) else {
+        guard FileManager.default.fileExists(atPath: restoredURL.path) else {
             return nil
         }
 
         return Track(
             id: track.id,
-            url: normalizedURL,
+            url: restoredURL,
             title: track.title,
             artist: track.artist,
             album: track.album,
             duration: track.duration,
             artworkData: track.artworkData,
             bookmarkData: resolvedBookmarkData,
-            isPlayable: track.isPlayable,
+            isPlayable: true,
             unplayableReason: nil
         )
     }

@@ -19,6 +19,10 @@ struct PlayerView: View {
     @State private var volumeFadeTask: Task<Void, Never>?
     @State private var isVolumeFadeInProgress = false
     @State private var sectionVisibilityBeforeCompact: SectionVisibilitySnapshot?
+    @State private var playlistDraggingTrackID: Track.ID?
+    @State private var playlistDragTranslation: CGFloat = 0
+    @State private var playlistDragStartIndex: Int?
+    @State private var playlistDragTargetIndex: Int?
 
     private let volumeMuteThreshold: Double = 0.0001
     private let defaultUnmutedVolume: Double = 0.8
@@ -94,6 +98,10 @@ struct PlayerView: View {
 
     private var rootTopPadding: CGFloat {
         isEffectiveCompactMode ? 2 : density.contentPadding
+    }
+
+    private var playlistRowStride: CGFloat {
+        density.playlistRowHeight + 4
     }
 
     var body: some View {
@@ -283,31 +291,61 @@ struct PlayerView: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(selection: $viewModel.selectedTrackID) {
-                    ForEach(viewModel.tracks) { track in
-                        PlaylistRowView(
-                            title: track.title,
-                            duration: track.duration.map(timeString),
-                            isPlayable: track.isPlayable,
-                            density: density
-                        )
-                        .tag(track.id)
-                        .contentShape(Rectangle())
-                        .contextMenu {
-                            Button("Remove") {
-                                viewModel.removeTrack(id: track.id)
+                ScrollView {
+                    LazyVStack(spacing: 4) {
+                        if playlistInsertionSlot(for: viewModel.tracks.count) == 0 {
+                            PlaylistInsertionIndicatorView()
+                        }
+                        ForEach(Array(viewModel.tracks.enumerated()), id: \.element.id) { index, track in
+                            let isSelected = viewModel.selectedTrackID == track.id
+                            let isNowPlayingTrack = viewModel.playingTrack?.id == track.id && viewModel.isPlaying
+                            let isDraggingRow = playlistDraggingTrackID == track.id
+                            PlaylistRowView(
+                                number: index + 1,
+                                title: track.title,
+                                duration: track.duration.map(timeString),
+                                isPlayable: track.isPlayable,
+                                isSelected: isSelected,
+                                isNowPlayingTrack: isNowPlayingTrack,
+                                isDragging: isDraggingRow,
+                                density: density
+                            )
+                            .contentShape(Rectangle())
+                            .offset(y: playlistRowOffset(for: index, trackID: track.id))
+                            .zIndex(isDraggingRow ? 100 : 0)
+                            .contextMenu {
+                                Button("Remove") {
+                                    viewModel.removeTrack(id: track.id)
+                                }
+                            }
+                            .onTapGesture {
+                                viewModel.selectedTrackID = track.id
+                            }
+                            .simultaneousGesture(
+                                TapGesture(count: 2).onEnded {
+                                    viewModel.selectedTrackID = track.id
+                                    viewModel.playTrack(with: track.id)
+                                }
+                            )
+                            .simultaneousGesture(
+                                DragGesture(minimumDistance: 4)
+                                    .onChanged { value in
+                                        handlePlaylistDragChanged(trackID: track.id, translationY: value.translation.height)
+                                    }
+                                    .onEnded { _ in
+                                        handlePlaylistDragEnded(trackID: track.id)
+                                    }
+                            )
+                            .accessibilityHint(track.isPlayable ? "Play this track" : "Track cannot be played")
+
+                            if playlistInsertionSlot(for: viewModel.tracks.count) == index + 1 {
+                                PlaylistInsertionIndicatorView()
                             }
                         }
-                        .onTapGesture(count: 2) {
-                            viewModel.selectedTrackID = track.id
-                            viewModel.playTrack(with: track.id)
-                        }
-                        .accessibilityHint(track.isPlayable ? "Play this track" : "Track cannot be played")
                     }
-                    .onMove(perform: viewModel.moveTracks(from:to:))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
                 }
-                .listStyle(.inset(alternatesRowBackgrounds: false))
-                .scrollContentBackground(.hidden)
                 .background(Color.clear)
             }
         }
@@ -336,7 +374,7 @@ struct PlayerView: View {
                     .font(.caption)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
-                    .frame(width: density.transportTimeWidth, alignment: .leading)
+                    .frame(width: density.transportTimeWidth, alignment: .center)
 
                 SeekBar(
                     value: scrubPosition,
@@ -362,7 +400,7 @@ struct PlayerView: View {
                     .font(.caption)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
-                    .frame(width: density.transportTimeWidth, alignment: .trailing)
+                    .frame(width: density.transportTimeWidth, alignment: .center)
             }
             .frame(maxWidth: .infinity)
             .layoutPriority(1)
@@ -484,7 +522,7 @@ struct PlayerView: View {
                 .font(.caption)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
-                .frame(width: density.transportTimeWidth, alignment: .trailing)
+                .frame(width: density.transportTimeWidth, alignment: .center)
 
             Slider(
                 value: $scrubPosition,
@@ -504,7 +542,7 @@ struct PlayerView: View {
                 .font(.caption)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
-                .frame(width: density.transportTimeWidth, alignment: .leading)
+                .frame(width: density.transportTimeWidth, alignment: .center)
 
             volumeToggleButton
 
@@ -682,6 +720,88 @@ struct PlayerView: View {
         volumeFadeTask?.cancel()
         volumeFadeTask = nil
         isVolumeFadeInProgress = false
+    }
+
+    private func handlePlaylistDragChanged(trackID: Track.ID, translationY: CGFloat) {
+        if playlistDraggingTrackID == nil {
+            playlistDraggingTrackID = trackID
+            playlistDragTranslation = 0
+            playlistDragStartIndex = viewModel.tracks.firstIndex(where: { $0.id == trackID })
+            playlistDragTargetIndex = playlistDragStartIndex
+        }
+
+        guard playlistDraggingTrackID == trackID,
+              let startIndex = playlistDragStartIndex else {
+            return
+        }
+
+        playlistDragTranslation = translationY
+
+        let dragStep = Int((translationY / playlistRowStride).rounded())
+        let maxIndex = max(viewModel.tracks.count - 1, 0)
+        let nextTargetIndex = min(max(startIndex + dragStep, 0), maxIndex)
+        if playlistDragTargetIndex != nextTargetIndex {
+            withAnimation(.interactiveSpring(response: 0.2, dampingFraction: 0.88)) {
+                playlistDragTargetIndex = nextTargetIndex
+            }
+        }
+    }
+
+    private func handlePlaylistDragEnded(trackID: Track.ID) {
+        guard playlistDraggingTrackID == trackID,
+              let sourceIndex = playlistDragStartIndex else {
+            return
+        }
+
+        withAnimation(.easeOut(duration: 0.12)) {
+            playlistDragTranslation = 0
+        }
+
+        let targetIndex = playlistDragTargetIndex ?? sourceIndex
+        if targetIndex != sourceIndex {
+            let destinationIndex = targetIndex > sourceIndex ? targetIndex + 1 : targetIndex
+            withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.88)) {
+                viewModel.moveTrack(id: trackID, to: destinationIndex, persist: false)
+            }
+            viewModel.persistTrackOrder()
+        }
+
+        playlistDraggingTrackID = nil
+        playlistDragStartIndex = nil
+        playlistDragTargetIndex = nil
+    }
+
+    private func playlistRowOffset(for rowIndex: Int, trackID: Track.ID) -> CGFloat {
+        guard let draggingTrackID = playlistDraggingTrackID,
+              let sourceIndex = playlistDragStartIndex,
+              let targetIndex = playlistDragTargetIndex else {
+            return 0
+        }
+
+        if trackID == draggingTrackID {
+            return playlistDragTranslation
+        }
+
+        if sourceIndex < targetIndex, rowIndex > sourceIndex, rowIndex <= targetIndex {
+            return -playlistRowStride
+        }
+
+        if sourceIndex > targetIndex, rowIndex >= targetIndex, rowIndex < sourceIndex {
+            return playlistRowStride
+        }
+
+        return 0
+    }
+
+    private func playlistInsertionSlot(for trackCount: Int) -> Int? {
+        guard let sourceIndex = playlistDragStartIndex,
+              let targetIndex = playlistDragTargetIndex,
+              sourceIndex != targetIndex else {
+            return nil
+        }
+
+        let rawSlot = sourceIndex < targetIndex ? targetIndex + 1 : targetIndex
+        return min(max(rawSlot, 0), trackCount)
     }
 
     private func revealInFinder(_ fileURL: URL) {
@@ -906,30 +1026,117 @@ private struct NormalPlayerLayoutView: View {
 }
 
 private struct PlaylistRowView: View {
+    let number: Int
     let title: String
     let duration: String?
     let isPlayable: Bool
+    let isSelected: Bool
+    let isNowPlayingTrack: Bool
+    let isDragging: Bool
     let density: DensityMetrics
 
     var body: some View {
         HStack(spacing: density.playlistRowSpacing) {
+            Text("\(number)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(isSelected ? Color.white.opacity(0.9) : .secondary)
+                .frame(width: 28, alignment: .trailing)
+
             Text(title)
                 .lineLimit(1)
-                .foregroundStyle(isPlayable ? .primary : .secondary)
+                .foregroundStyle(titleColor)
 
             Spacer(minLength: density.playlistRowSpacing / 2)
 
             if let duration {
                 Text(duration)
                     .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(secondaryColor)
+            }
+
+            if isNowPlayingTrack {
+                NowPlayingIndicatorView(color: isSelected ? .white : .accentColor)
+                    .accessibilityHidden(true)
+            } else {
+                Color.clear
+                    .frame(width: 14, height: 12)
+                    .accessibilityHidden(true)
             }
         }
+        .padding(.horizontal, 10)
         .padding(.vertical, density.playlistRowVerticalPadding)
         .frame(minHeight: density.playlistRowHeight, alignment: .center)
+        .background(
+            RoundedRectangle(cornerRadius: density.cardCornerRadius, style: .continuous)
+                .fill(rowBackgroundColor)
+        )
+        .shadow(color: isDragging ? Color.black.opacity(0.22) : .clear, radius: isDragging ? 9 : 0, x: 0, y: isDragging ? 4 : 0)
+        .scaleEffect(isDragging ? 1.008 : 1)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(title)
         .accessibilityValue(duration ?? "Unknown length")
+    }
+
+    private var rowBackgroundColor: Color {
+        if isSelected {
+            return .accentColor
+        }
+        if isNowPlayingTrack {
+            return Color.black.opacity(0.08)
+        }
+        return .clear
+    }
+
+    private var titleColor: Color {
+        if isSelected {
+            return .white
+        }
+        return isPlayable ? .primary : .secondary
+    }
+
+    private var secondaryColor: Color {
+        isSelected ? Color.white.opacity(0.85) : .secondary
+    }
+}
+
+private struct NowPlayingIndicatorView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    let color: Color
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { context in
+            let time = context.date.timeIntervalSinceReferenceDate
+
+            HStack(alignment: .bottom, spacing: 2) {
+                ForEach(0..<3, id: \.self) { index in
+                    Capsule(style: .continuous)
+                        .fill(color)
+                        .frame(width: 3, height: barHeight(at: index, time: time))
+                }
+            }
+            .frame(width: 14, height: 12, alignment: .bottom)
+        }
+    }
+
+    private func barHeight(at index: Int, time: TimeInterval) -> CGFloat {
+        if reduceMotion {
+            return [6.0, 11.0, 8.0][index]
+        }
+
+        let oscillation = 0.45 + 0.55 * abs(sin(time * 5.4 + Double(index) * 1.2))
+        return 4 + CGFloat(oscillation) * 8
+    }
+}
+
+private struct PlaylistInsertionIndicatorView: View {
+    var body: some View {
+        Capsule(style: .continuous)
+            .fill(Color.accentColor.opacity(0.9))
+            .frame(height: 3)
+            .padding(.leading, 46)
+            .padding(.trailing, 10)
+            .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .center)))
+            .accessibilityHidden(true)
     }
 }
 
