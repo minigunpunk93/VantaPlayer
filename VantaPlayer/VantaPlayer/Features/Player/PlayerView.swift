@@ -134,6 +134,9 @@ struct PlayerView: View {
         .padding(.bottom, density.contentPadding)
         .padding(.top, rootTopPadding)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background {
+            LayeredWindowGlassBackground(cornerRadius: density.cardCornerRadius + 10)
+        }
         .dropDestination(for: URL.self) { droppedURLs, _ in
             viewModel.importTracks(from: droppedURLs)
             return !droppedURLs.isEmpty
@@ -351,7 +354,8 @@ struct PlayerView: View {
         }
         .vantaCard(
             cornerRadius: density.cardCornerRadius,
-            borderColor: dropTargetActive ? Color.accentColor.opacity(0.7) : Color.white.opacity(0.08)
+            borderColor: dropTargetActive ? Color.accentColor.opacity(0.72) : Color.white.opacity(0.14),
+            depth: .background
         )
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Playlist")
@@ -478,7 +482,7 @@ struct PlayerView: View {
         .controlSize(density.controlSize)
         .padding(.horizontal, max(6, density.transportHorizontalPadding - 2))
         .padding(.vertical, density.transportVerticalPadding)
-        .vantaCard(cornerRadius: density.cardCornerRadius)
+        .vantaCard(cornerRadius: density.cardCornerRadius, depth: .foreground)
         .accessibilityElement(children: .contain)
     }
 
@@ -554,7 +558,7 @@ struct PlayerView: View {
         .controlSize(density.controlSize)
         .padding(.horizontal, density.transportHorizontalPadding)
         .padding(.vertical, density.transportVerticalPadding)
-        .vantaCard(cornerRadius: density.cardCornerRadius)
+        .vantaCard(cornerRadius: density.cardCornerRadius, depth: .foreground)
         .accessibilityElement(children: .contain)
     }
 
@@ -824,6 +828,49 @@ struct PlayerView: View {
         }
 
         return "\(minutes):\(paddedSeconds)"
+    }
+}
+
+private struct LayeredWindowGlassBackground: View {
+    let cornerRadius: CGFloat
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+
+        ZStack {
+            shape
+                .fill(.ultraThinMaterial)
+
+            shape
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.24),
+                            Color.white.opacity(0.08)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+
+            shape
+                .fill(
+                    RadialGradient(
+                        colors: [
+                            Color.white.opacity(0.16),
+                            .clear
+                        ],
+                        center: .topLeading,
+                        startRadius: 12,
+                        endRadius: 360
+                    )
+                )
+        }
+        .overlay(
+            shape.strokeBorder(Color.white.opacity(0.28), lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.12), radius: 28, x: 0, y: 14)
+        .padding(1)
     }
 }
 
