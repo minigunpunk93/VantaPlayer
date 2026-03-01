@@ -11,6 +11,8 @@ import MediaPlayer
 @MainActor
 final class PlayerViewModel: ObservableObject {
     private static let playbackTimePublishStep: TimeInterval = 1.0 / 20.0
+    private static let importProgressPublishInterval: TimeInterval = 0.1
+    private static let importMetadataBatchSize = 4
 
     struct InlineError: Identifiable {
         let id = UUID()
@@ -44,21 +46,22 @@ final class PlayerViewModel: ObservableObject {
     private var preferredVolume: Float = 0.8
     private var playbackPositions: [Track.ID: TimeInterval] = [:]
     private var trackIndexByID: [Track.ID: Int] = [:]
+    private var trackURLSet: Set<URL> = []
 
     private let bookmarksStore = BookmarksStore()
     private let sessionStore: SessionStore
+    private let persistenceCoordinator: PersistenceCoordinator
 
     private var audioPlayer: AudioEnginePlayer?
 
     private var playerCancellables: Set<AnyCancellable> = []
     private var importTask: Task<Void, Never>?
-    private var queuePersistenceTask: Task<Void, Never>?
-    private var playbackPersistenceTask: Task<Void, Never>?
 
     private var shouldAutoplayOnImport = false
     private var didAutoplayDuringImport = false
     private var activeImportGeneration = 0
     private var lastPersistedSecond = -1
+    private var lastImportProgressUpdate = Date.distantPast
 
     #if canImport(MediaPlayer)
     private var remoteCommandsConfigured = false
@@ -79,6 +82,7 @@ final class PlayerViewModel: ObservableObject {
 
     init() {
         sessionStore = SessionStore(bookmarksStore: bookmarksStore)
+        persistenceCoordinator = PersistenceCoordinator(sessionStore: sessionStore)
     }
 
     var playbackDuration: TimeInterval {
@@ -163,30 +167,42 @@ final class PlayerViewModel: ObservableObject {
 
         let generation = beginImport(label: "Importing 0/\(acceptedURLs.count)", total: acceptedURLs.count)
 
-        importTask = Task { [acceptedURLs, generation] in
+        importTask = Task { [acceptedURLs, generation, bookmarksStore] in
             var importedCount = 0
             var firstImportedTrackID: Track.ID?
+            var completedCount = 0
 
-            for (index, url) in acceptedURLs.enumerated() {
+            let batchSize = max(1, Self.importMetadataBatchSize)
+            for startIndex in stride(from: 0, to: acceptedURLs.count, by: batchSize) {
                 if Task.isCancelled { break }
                 guard generation == activeImportGeneration else { return }
 
-                let track = await Task.detached(priority: .userInitiated) {
-                    await TrackImportWorker.makeTrack(from: url)
-                }.value
-
-                if appendImportedTrack(track) {
-                    importedCount += 1
-                    if firstImportedTrackID == nil {
-                        firstImportedTrackID = track.id
-                    }
-                }
-
-                importProgress = ImportProgress(
-                    completed: index + 1,
-                    total: acceptedURLs.count,
-                    label: "Importing \(index + 1)/\(acceptedURLs.count)"
+                let endIndex = min(startIndex + batchSize, acceptedURLs.count)
+                let batch = Array(acceptedURLs[startIndex..<endIndex])
+                let importedBatch = await TrackImportWorker.makeTracks(
+                    from: batch,
+                    bookmarksStore: bookmarksStore
                 )
+
+                for track in importedBatch {
+                    if Task.isCancelled { break }
+                    guard generation == activeImportGeneration else { return }
+
+                    completedCount += 1
+                    if appendImportedTrack(track) {
+                        importedCount += 1
+                        if firstImportedTrackID == nil {
+                            firstImportedTrackID = track.id
+                        }
+                    }
+
+                    updateImportProgress(
+                        completed: completedCount,
+                        total: acceptedURLs.count,
+                        label: "Importing \(completedCount)/\(acceptedURLs.count)",
+                        force: completedCount == acceptedURLs.count
+                    )
+                }
             }
 
             finishImport(
@@ -201,7 +217,7 @@ final class PlayerViewModel: ObservableObject {
     func importFolder(from folderURL: URL) {
         let normalizedFolder = normalizedURL(folderURL)
         let didStartScope = bookmarksStore.beginAccess(to: normalizedFolder)
-        let existingURLs = Set(tracks.map { normalizedURL($0.url) })
+        let existingURLs = trackURLSet
         let stream = TrackImportWorker.folderAudioFilesStream(
             rootURL: normalizedFolder,
             allowedExtensions: Self.allowedExtensions,
@@ -210,7 +226,7 @@ final class PlayerViewModel: ObservableObject {
 
         let generation = beginImport(label: "Scanning folder…", total: 0)
 
-        importTask = Task { [generation] in
+        importTask = Task { [generation, bookmarksStore] in
             defer {
                 if didStartScope {
                     bookmarksStore.endAccess(to: normalizedFolder)
@@ -220,33 +236,72 @@ final class PlayerViewModel: ObservableObject {
             var discoveredCount = 0
             var importedCount = 0
             var firstImportedTrackID: Track.ID?
+            var pendingURLs: [URL] = []
+            pendingURLs.reserveCapacity(Self.importMetadataBatchSize)
 
             for await url in stream {
                 if Task.isCancelled { break }
                 guard generation == activeImportGeneration else { return }
 
                 discoveredCount += 1
-                importProgress = ImportProgress(
+                pendingURLs.append(url)
+
+                updateImportProgress(
                     completed: importedCount,
                     total: discoveredCount,
                     label: "Importing \(importedCount)/\(discoveredCount)"
                 )
 
-                let track = await Task.detached(priority: .userInitiated) {
-                    await TrackImportWorker.makeTrack(from: url)
-                }.value
+                guard pendingURLs.count >= Self.importMetadataBatchSize else {
+                    continue
+                }
 
-                if appendImportedTrack(track) {
-                    importedCount += 1
-                    if firstImportedTrackID == nil {
-                        firstImportedTrackID = track.id
+                let importedBatch = await TrackImportWorker.makeTracks(
+                    from: pendingURLs,
+                    bookmarksStore: bookmarksStore
+                )
+                pendingURLs.removeAll(keepingCapacity: true)
+
+                for track in importedBatch {
+                    if Task.isCancelled { break }
+                    guard generation == activeImportGeneration else { return }
+
+                    if appendImportedTrack(track) {
+                        importedCount += 1
+                        if firstImportedTrackID == nil {
+                            firstImportedTrackID = track.id
+                        }
                     }
                 }
 
-                importProgress = ImportProgress(
+                updateImportProgress(
                     completed: importedCount,
                     total: discoveredCount,
-                    label: "Importing \(importedCount)/\(discoveredCount)"
+                    label: "Importing \(importedCount)/\(discoveredCount)",
+                    force: true
+                )
+            }
+
+            if !pendingURLs.isEmpty, !Task.isCancelled {
+                let importedBatch = await TrackImportWorker.makeTracks(
+                    from: pendingURLs,
+                    bookmarksStore: bookmarksStore
+                )
+                for track in importedBatch {
+                    guard generation == activeImportGeneration else { return }
+                    if appendImportedTrack(track) {
+                        importedCount += 1
+                        if firstImportedTrackID == nil {
+                            firstImportedTrackID = track.id
+                        }
+                    }
+                }
+
+                updateImportProgress(
+                    completed: importedCount,
+                    total: discoveredCount,
+                    label: "Importing \(importedCount)/\(discoveredCount)",
+                    force: true
                 )
             }
 
@@ -262,6 +317,34 @@ final class PlayerViewModel: ObservableObject {
     func moveTracks(from source: IndexSet, to destination: Int) {
         tracks.move(fromOffsets: source, toOffset: destination)
         rebuildTrackIndexCache()
+        scheduleQueueSave()
+    }
+
+    func moveTrack(id: Track.ID, relativeTo targetID: Track.ID, placeAfter: Bool, persist: Bool = true) {
+        guard let targetIndex = trackIndex(for: targetID) else { return }
+        let destinationIndex = targetIndex + (placeAfter ? 1 : 0)
+        moveTrack(id: id, to: destinationIndex, persist: persist)
+    }
+
+    func moveTrack(id: Track.ID, to destinationIndex: Int, persist: Bool = true) {
+        guard let sourceIndex = trackIndex(for: id) else { return }
+
+        let clampedDestination = max(0, min(destinationIndex, tracks.count))
+        if sourceIndex == clampedDestination || sourceIndex + 1 == clampedDestination {
+            return
+        }
+
+        let movingTrack = tracks.remove(at: sourceIndex)
+        let insertionIndex = sourceIndex < clampedDestination ? clampedDestination - 1 : clampedDestination
+        tracks.insert(movingTrack, at: insertionIndex)
+
+        rebuildTrackIndexCache()
+        if persist {
+            scheduleQueueSave()
+        }
+    }
+
+    func persistTrackOrder() {
         scheduleQueueSave()
     }
 
@@ -526,10 +609,21 @@ final class PlayerViewModel: ObservableObject {
         let generation = activeImportGeneration
         isImporting = true
         importProgress = ImportProgress(completed: 0, total: total, label: label)
+        lastImportProgressUpdate = Date.distantPast
         inlineError = nil
         shouldAutoplayOnImport = tracks.isEmpty && !isPlaying
         didAutoplayDuringImport = false
         return generation
+    }
+
+    private func updateImportProgress(completed: Int, total: Int, label: String, force: Bool = false) {
+        let now = Date()
+        if !force, now.timeIntervalSince(lastImportProgressUpdate) < Self.importProgressPublishInterval {
+            return
+        }
+
+        lastImportProgressUpdate = now
+        importProgress = ImportProgress(completed: completed, total: total, label: label)
     }
 
     private func finishImport(discoveredCount: Int, importedCount: Int, firstTrackID: Track.ID?, generation: Int) {
@@ -564,7 +658,7 @@ final class PlayerViewModel: ObservableObject {
     @discardableResult
     private func appendImportedTrack(_ incomingTrack: Track) -> Bool {
         let normalized = normalizedURL(incomingTrack.url)
-        guard !tracks.contains(where: { normalizedURL($0.url) == normalized }) else {
+        guard !trackURLSet.contains(normalized) else {
             return false
         }
 
@@ -576,6 +670,7 @@ final class PlayerViewModel: ObservableObject {
 
         tracks.append(track)
         trackIndexByID[track.id] = tracks.count - 1
+        trackURLSet.insert(normalized)
         if selectedTrackID == nil {
             selectedTrackID = track.id
         }
@@ -685,7 +780,7 @@ final class PlayerViewModel: ObservableObject {
 
     private func filteredImportURLs(from urls: [URL]) -> [URL] {
         var uniqueURLs = Set<URL>()
-        let existingURLs = Set(tracks.map { normalizedURL($0.url) })
+        let existingURLs = trackURLSet
 
         var accepted: [URL] = []
         accepted.reserveCapacity(urls.count)
@@ -726,9 +821,12 @@ final class PlayerViewModel: ObservableObject {
 
     private func rebuildTrackIndexCache() {
         trackIndexByID.removeAll(keepingCapacity: true)
+        trackURLSet.removeAll(keepingCapacity: true)
         trackIndexByID.reserveCapacity(tracks.count)
+        trackURLSet.reserveCapacity(tracks.count)
         for (index, track) in tracks.enumerated() {
             trackIndexByID[track.id] = index
+            trackURLSet.insert(normalizedURL(track.url))
         }
     }
 
@@ -740,25 +838,56 @@ final class PlayerViewModel: ObservableObject {
     }
 
     private func scheduleQueueSave() {
-        queuePersistenceTask?.cancel()
         let snapshot = SessionStore.QueueSnapshot(tracks: tracks)
+        let fingerprint = queueFingerprint(for: snapshot)
 
-        queuePersistenceTask = Task.detached(priority: .utility) { [sessionStore] in
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            guard !Task.isCancelled else { return }
-            sessionStore.saveQueue(snapshot: snapshot)
+        Task {
+            await persistenceCoordinator.scheduleQueueSave(snapshot: snapshot, fingerprint: fingerprint)
         }
     }
 
     private func schedulePlaybackSave() {
-        playbackPersistenceTask?.cancel()
         let snapshot = makePlaybackSnapshot()
+        let fingerprint = playbackFingerprint(for: snapshot)
 
-        playbackPersistenceTask = Task.detached(priority: .utility) { [sessionStore] in
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            guard !Task.isCancelled else { return }
-            sessionStore.savePlayback(snapshot: snapshot)
+        Task {
+            await persistenceCoordinator.schedulePlaybackSave(snapshot: snapshot, fingerprint: fingerprint)
         }
+    }
+
+    private func queueFingerprint(for snapshot: SessionStore.QueueSnapshot) -> Int {
+        var hasher = Hasher()
+        hasher.combine(snapshot.tracks.count)
+        for track in snapshot.tracks {
+            hasher.combine(track.id)
+            hasher.combine(normalizedURL(track.url).path)
+            hasher.combine(track.title)
+            hasher.combine(track.artist ?? "")
+            hasher.combine(track.album ?? "")
+            hasher.combine(track.duration ?? -1)
+            hasher.combine(track.isPlayable)
+            hasher.combine(track.unplayableReason ?? "")
+            hasher.combine(track.bookmarkData?.count ?? -1)
+            hasher.combine(track.artworkData?.count ?? -1)
+        }
+        return hasher.finalize()
+    }
+
+    private func playbackFingerprint(for snapshot: SessionStore.PlaybackSnapshot) -> Int {
+        var hasher = Hasher()
+        hasher.combine(snapshot.selectedTrackID)
+        hasher.combine(snapshot.playingTrackID)
+        hasher.combine(snapshot.wasPlaying)
+        hasher.combine(Int(snapshot.volume * 1000))
+
+        let sortedPositions = snapshot.playbackPositions.sorted { lhs, rhs in
+            lhs.key.uuidString < rhs.key.uuidString
+        }
+        for (trackID, time) in sortedPositions {
+            hasher.combine(trackID)
+            hasher.combine(Int(time * 10))
+        }
+        return hasher.finalize()
     }
 
     private func makePlaybackSnapshot() -> SessionStore.PlaybackSnapshot {
@@ -887,8 +1016,98 @@ final class PlayerViewModel: ObservableObject {
     #endif
 }
 
+private actor PersistenceCoordinator {
+    private let sessionStore: SessionStore
+    private let debounceNanoseconds: UInt64
+
+    private var queueTask: Task<Void, Never>?
+    private var latestQueueSnapshot: SessionStore.QueueSnapshot?
+    private var latestQueueFingerprint: Int?
+    private var lastSavedQueueFingerprint: Int?
+
+    private var playbackTask: Task<Void, Never>?
+    private var latestPlaybackSnapshot: SessionStore.PlaybackSnapshot?
+    private var latestPlaybackFingerprint: Int?
+    private var lastSavedPlaybackFingerprint: Int?
+
+    init(sessionStore: SessionStore, debounceNanoseconds: UInt64 = 300_000_000) {
+        self.sessionStore = sessionStore
+        self.debounceNanoseconds = debounceNanoseconds
+    }
+
+    func scheduleQueueSave(snapshot: SessionStore.QueueSnapshot, fingerprint: Int) {
+        latestQueueSnapshot = snapshot
+        latestQueueFingerprint = fingerprint
+
+        queueTask?.cancel()
+        queueTask = Task { [debounceNanoseconds] in
+            try? await Task.sleep(nanoseconds: debounceNanoseconds)
+            guard !Task.isCancelled else { return }
+            flushQueueIfNeeded()
+        }
+    }
+
+    func schedulePlaybackSave(snapshot: SessionStore.PlaybackSnapshot, fingerprint: Int) {
+        latestPlaybackSnapshot = snapshot
+        latestPlaybackFingerprint = fingerprint
+
+        playbackTask?.cancel()
+        playbackTask = Task { [debounceNanoseconds] in
+            try? await Task.sleep(nanoseconds: debounceNanoseconds)
+            guard !Task.isCancelled else { return }
+            flushPlaybackIfNeeded()
+        }
+    }
+
+    private func flushQueueIfNeeded() {
+        guard let snapshot = latestQueueSnapshot,
+              let fingerprint = latestQueueFingerprint,
+              fingerprint != lastSavedQueueFingerprint else {
+            return
+        }
+
+        sessionStore.saveQueue(snapshot: snapshot)
+        lastSavedQueueFingerprint = fingerprint
+    }
+
+    private func flushPlaybackIfNeeded() {
+        guard let snapshot = latestPlaybackSnapshot,
+              let fingerprint = latestPlaybackFingerprint,
+              fingerprint != lastSavedPlaybackFingerprint else {
+            return
+        }
+
+        sessionStore.savePlayback(snapshot: snapshot)
+        lastSavedPlaybackFingerprint = fingerprint
+    }
+}
+
 private enum TrackImportWorker {
+    nonisolated static func makeTracks(from urls: [URL], bookmarksStore: BookmarksStore) async -> [Track] {
+        guard !urls.isEmpty else { return [] }
+
+        return await withTaskGroup(of: (Int, Track).self, returning: [Track].self) { group in
+            for (index, url) in urls.enumerated() {
+                group.addTask(priority: .userInitiated) {
+                    let bookmarkData = makeBookmark(for: url, bookmarksStore: bookmarksStore)
+                    let track = await makeTrack(from: url, bookmarkData: bookmarkData)
+                    return (index, track)
+                }
+            }
+
+            var orderedTracks: [Track?] = Array(repeating: nil, count: urls.count)
+            for await (index, track) in group {
+                orderedTracks[index] = track
+            }
+            return orderedTracks.compactMap { $0 }
+        }
+    }
+
     nonisolated static func makeTrack(from url: URL) async -> Track {
+        await makeTrack(from: url, bookmarkData: nil)
+    }
+
+    nonisolated static func makeTrack(from url: URL, bookmarkData: Data?) async -> Track {
         let normalized = url.standardizedFileURL.resolvingSymlinksInPath()
         let fallbackTitle = normalized.deletingPathExtension().lastPathComponent
         let asset = AVURLAsset(url: normalized)
@@ -922,7 +1141,7 @@ private enum TrackImportWorker {
                 album: album,
                 duration: resolvedDuration,
                 artworkData: artworkData,
-                bookmarkData: nil,
+                bookmarkData: bookmarkData,
                 isPlayable: isPlayable,
                 unplayableReason: isPlayable ? nil : "Unsupported codec or format"
             )
@@ -934,7 +1153,7 @@ private enum TrackImportWorker {
                 album: nil,
                 duration: nil,
                 artworkData: nil,
-                bookmarkData: nil,
+                bookmarkData: bookmarkData,
                 isPlayable: false,
                 unplayableReason: "Metadata read failed"
             )
@@ -1027,5 +1246,17 @@ private enum TrackImportWorker {
         }
 
         return nil
+    }
+
+    private nonisolated static func makeBookmark(for url: URL, bookmarksStore: BookmarksStore) -> Data? {
+        let normalized = url.standardizedFileURL.resolvingSymlinksInPath()
+        let didStartScope = bookmarksStore.beginAccess(to: normalized)
+        defer {
+            if didStartScope {
+                bookmarksStore.endAccess(to: normalized)
+            }
+        }
+
+        return try? bookmarksStore.makeBookmark(for: normalized)
     }
 }

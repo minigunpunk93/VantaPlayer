@@ -19,6 +19,10 @@ struct PlayerView: View {
     @State private var volumeFadeTask: Task<Void, Never>?
     @State private var isVolumeFadeInProgress = false
     @State private var sectionVisibilityBeforeCompact: SectionVisibilitySnapshot?
+    @State private var playlistDraggingTrackID: Track.ID?
+    @State private var playlistDragTranslation: CGFloat = 0
+    @State private var playlistDragStartIndex: Int?
+    @State private var playlistDragTargetIndex: Int?
 
     private let volumeMuteThreshold: Double = 0.0001
     private let defaultUnmutedVolume: Double = 0.8
@@ -94,6 +98,10 @@ struct PlayerView: View {
 
     private var rootTopPadding: CGFloat {
         isEffectiveCompactMode ? 2 : density.contentPadding
+    }
+
+    private var playlistRowStride: CGFloat {
+        density.playlistRowHeight + 4
     }
 
     var body: some View {
@@ -283,31 +291,63 @@ struct PlayerView: View {
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(selection: $viewModel.selectedTrackID) {
-                    ForEach(viewModel.tracks) { track in
-                        PlaylistRowView(
-                            title: track.title,
-                            duration: track.duration.map(timeString),
-                            isPlayable: track.isPlayable,
-                            density: density
-                        )
-                        .tag(track.id)
-                        .contentShape(Rectangle())
-                        .contextMenu {
-                            Button("Remove") {
-                                viewModel.removeTrack(id: track.id)
+                ScrollView {
+                    LazyVStack(spacing: 4) {
+                        if playlistInsertionSlot(for: viewModel.tracks.count) == 0 {
+                            PlaylistInsertionIndicatorView()
+                        }
+
+                        ForEach(Array(viewModel.tracks.enumerated()), id: \.element.id) { index, track in
+                            let isSelected = viewModel.selectedTrackID == track.id
+                            let isDraggingRow = playlistDraggingTrackID == track.id
+
+                            PlaylistRowView(
+                                title: track.title,
+                                duration: track.duration.map(timeString),
+                                isPlayable: track.isPlayable,
+                                density: density
+                            )
+                            .padding(.horizontal, 10)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(isSelected ? Color.primary.opacity(0.09) : Color.clear)
+                            )
+                            .contentShape(Rectangle())
+                            .offset(y: playlistRowOffset(for: index, trackID: track.id))
+                            .zIndex(isDraggingRow ? 100 : 0)
+                            .contextMenu {
+                                Button("Remove") {
+                                    viewModel.removeTrack(id: track.id)
+                                }
+                            }
+                            .onTapGesture {
+                                viewModel.selectedTrackID = track.id
+                            }
+                            .simultaneousGesture(
+                                TapGesture(count: 2).onEnded {
+                                    viewModel.selectedTrackID = track.id
+                                    viewModel.playTrack(with: track.id)
+                                }
+                            )
+                            .simultaneousGesture(
+                                DragGesture(minimumDistance: 4)
+                                    .onChanged { value in
+                                        handlePlaylistDragChanged(trackID: track.id, translationY: value.translation.height)
+                                    }
+                                    .onEnded { _ in
+                                        handlePlaylistDragEnded(trackID: track.id)
+                                    }
+                            )
+                            .accessibilityHint(track.isPlayable ? "Play this track" : "Track cannot be played")
+
+                            if playlistInsertionSlot(for: viewModel.tracks.count) == index + 1 {
+                                PlaylistInsertionIndicatorView()
                             }
                         }
-                        .onTapGesture(count: 2) {
-                            viewModel.selectedTrackID = track.id
-                            viewModel.playTrack(with: track.id)
-                        }
-                        .accessibilityHint(track.isPlayable ? "Play this track" : "Track cannot be played")
                     }
-                    .onMove(perform: viewModel.moveTracks(from:to:))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
                 }
-                .listStyle(.inset(alternatesRowBackgrounds: false))
-                .scrollContentBackground(.hidden)
                 .background(Color.clear)
             }
         }
@@ -684,6 +724,88 @@ struct PlayerView: View {
         isVolumeFadeInProgress = false
     }
 
+    private func handlePlaylistDragChanged(trackID: Track.ID, translationY: CGFloat) {
+        if playlistDraggingTrackID == nil {
+            playlistDraggingTrackID = trackID
+            playlistDragTranslation = 0
+            playlistDragStartIndex = viewModel.tracks.firstIndex(where: { $0.id == trackID })
+            playlistDragTargetIndex = playlistDragStartIndex
+        }
+
+        guard playlistDraggingTrackID == trackID,
+              let startIndex = playlistDragStartIndex else {
+            return
+        }
+
+        playlistDragTranslation = translationY
+
+        let dragStep = Int((translationY / playlistRowStride).rounded())
+        let maxIndex = max(viewModel.tracks.count - 1, 0)
+        let nextTargetIndex = min(max(startIndex + dragStep, 0), maxIndex)
+        if playlistDragTargetIndex != nextTargetIndex {
+            withAnimation(.interactiveSpring(response: 0.2, dampingFraction: 0.88)) {
+                playlistDragTargetIndex = nextTargetIndex
+            }
+        }
+    }
+
+    private func handlePlaylistDragEnded(trackID: Track.ID) {
+        guard playlistDraggingTrackID == trackID,
+              let sourceIndex = playlistDragStartIndex else {
+            return
+        }
+
+        withAnimation(.easeOut(duration: 0.12)) {
+            playlistDragTranslation = 0
+        }
+
+        let targetIndex = playlistDragTargetIndex ?? sourceIndex
+        if targetIndex != sourceIndex {
+            let destinationIndex = targetIndex > sourceIndex ? targetIndex + 1 : targetIndex
+            withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.88)) {
+                viewModel.moveTrack(id: trackID, to: destinationIndex, persist: false)
+            }
+            viewModel.persistTrackOrder()
+        }
+
+        playlistDraggingTrackID = nil
+        playlistDragStartIndex = nil
+        playlistDragTargetIndex = nil
+    }
+
+    private func playlistRowOffset(for rowIndex: Int, trackID: Track.ID) -> CGFloat {
+        guard let draggingTrackID = playlistDraggingTrackID,
+              let sourceIndex = playlistDragStartIndex,
+              let targetIndex = playlistDragTargetIndex else {
+            return 0
+        }
+
+        if trackID == draggingTrackID {
+            return playlistDragTranslation
+        }
+
+        if sourceIndex < targetIndex, rowIndex > sourceIndex, rowIndex <= targetIndex {
+            return -playlistRowStride
+        }
+
+        if sourceIndex > targetIndex, rowIndex >= targetIndex, rowIndex < sourceIndex {
+            return playlistRowStride
+        }
+
+        return 0
+    }
+
+    private func playlistInsertionSlot(for trackCount: Int) -> Int? {
+        guard let sourceIndex = playlistDragStartIndex,
+              let targetIndex = playlistDragTargetIndex,
+              sourceIndex != targetIndex else {
+            return nil
+        }
+
+        let rawSlot = sourceIndex < targetIndex ? targetIndex + 1 : targetIndex
+        return min(max(rawSlot, 0), trackCount)
+    }
+
     private func revealInFinder(_ fileURL: URL) {
         NSWorkspace.shared.activateFileViewerSelecting([fileURL])
     }
@@ -930,6 +1052,16 @@ private struct PlaylistRowView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(title)
         .accessibilityValue(duration ?? "Unknown length")
+    }
+}
+
+private struct PlaylistInsertionIndicatorView: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 2, style: .continuous)
+            .fill(Color.accentColor.opacity(0.85))
+            .frame(height: 3)
+            .padding(.horizontal, 10)
+            .accessibilityHidden(true)
     }
 }
 

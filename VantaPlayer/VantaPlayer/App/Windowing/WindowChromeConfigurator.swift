@@ -39,7 +39,8 @@ final class WindowChromeConfigurator {
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
-        window.isMovableByWindowBackground = true
+        // Allow moving only via the native title/toolbar area.
+        window.isMovableByWindowBackground = false
         if let closeButton = window.standardWindowButton(.closeButton) {
             closeButton.isHidden = false
             closeButton.target = NSApp
