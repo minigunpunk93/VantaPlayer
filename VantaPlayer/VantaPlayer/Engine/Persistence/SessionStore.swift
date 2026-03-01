@@ -35,6 +35,8 @@ final class SessionStore: @unchecked Sendable {
         let id: UUID
         let path: String
         let bookmarkData: Data?
+        let bookmarkRootPath: String?
+        let relativePathFromBookmarkRoot: String?
         let title: String
         let artist: String?
         let album: String?
@@ -95,9 +97,7 @@ final class SessionStore: @unchecked Sendable {
 
     nonisolated func saveQueue(snapshot: QueueSnapshot) {
         let queue = snapshot.tracks.compactMap { persistedTrack(from: $0) }
-        guard let encoded = encode(PersistedQueue(queue: queue)) else {
-            return
-        }
+        guard let encoded = encode(PersistedQueue(queue: queue)) else { return }
 
         defaults.set(encoded, forKey: Keys.queue)
     }
@@ -215,7 +215,14 @@ final class SessionStore: @unchecked Sendable {
     }
 
     private nonisolated func persistedTrack(from track: Track) -> PersistedTrack? {
-        let bookmarkData = track.bookmarkData ?? (try? bookmarksStore.makeBookmark(for: track.url))
+        let bookmarkSourceURL: URL
+        if let bookmarkRootPath = track.bookmarkRootPath {
+            bookmarkSourceURL = URL(fileURLWithPath: bookmarkRootPath)
+        } else {
+            bookmarkSourceURL = track.url
+        }
+
+        let bookmarkData = track.bookmarkData ?? (try? bookmarksStore.makeBookmark(for: bookmarkSourceURL))
         let trimmedArtwork = track.artworkData.flatMap { data -> Data? in
             data.count <= maxArtworkBytes ? data : nil
         }
@@ -224,6 +231,8 @@ final class SessionStore: @unchecked Sendable {
             id: track.id,
             path: track.url.path,
             bookmarkData: bookmarkData,
+            bookmarkRootPath: track.bookmarkRootPath,
+            relativePathFromBookmarkRoot: track.relativePathFromBookmarkRoot,
             title: track.title,
             artist: track.artist,
             album: track.album,
@@ -236,31 +245,52 @@ final class SessionStore: @unchecked Sendable {
     private nonisolated func restoredTrack(from track: PersistedTrack) -> Track? {
         let resolvedURL: URL
         var resolvedBookmarkData = track.bookmarkData
+        var resolvedBookmarkRootPath = track.bookmarkRootPath
+        let fallbackURL = URL(fileURLWithPath: track.path)
+        let sanitizedRelativePath = sanitizeRelativePath(track.relativePathFromBookmarkRoot)
 
         if let bookmarkData = track.bookmarkData,
            let resolvedBookmark = bookmarksStore.resolveBookmark(bookmarkData) {
-            resolvedURL = resolvedBookmark.url
+            let bookmarkRootURL = resolvedBookmark.url
+            resolvedBookmarkRootPath = bookmarkRootURL.path
             resolvedBookmarkData = resolvedBookmark.bookmarkData
+            if let relativePath = sanitizedRelativePath {
+                resolvedURL = bookmarkRootURL.appendingPathComponent(relativePath)
+            } else {
+                resolvedURL = bookmarkRootURL
+            }
+        } else if let bookmarkRootPath = track.bookmarkRootPath,
+                  let relativePath = sanitizedRelativePath {
+            let bookmarkRootURL = URL(fileURLWithPath: bookmarkRootPath)
+            resolvedURL = bookmarkRootURL.appendingPathComponent(relativePath)
         } else {
-            resolvedURL = URL(fileURLWithPath: track.path)
+            resolvedURL = fallbackURL
         }
 
-        let normalizedURL = resolvedURL.standardizedFileURL.resolvingSymlinksInPath()
-        guard FileManager.default.fileExists(atPath: normalizedURL.path) else {
-            return nil
-        }
+        let restoredURL = resolvedURL
+        guard FileManager.default.fileExists(atPath: restoredURL.path) else { return nil }
 
         return Track(
             id: track.id,
-            url: normalizedURL,
+            url: restoredURL,
             title: track.title,
             artist: track.artist,
             album: track.album,
             duration: track.duration,
             artworkData: track.artworkData,
             bookmarkData: resolvedBookmarkData,
+            bookmarkRootPath: resolvedBookmarkRootPath,
+            relativePathFromBookmarkRoot: sanitizedRelativePath,
             isPlayable: track.isPlayable,
             unplayableReason: nil
         )
+    }
+
+    private nonisolated func sanitizeRelativePath(_ relativePath: String?) -> String? {
+        guard var relativePath else { return nil }
+        while relativePath.hasPrefix("/") {
+            relativePath.removeFirst()
+        }
+        return relativePath.isEmpty ? nil : relativePath
     }
 }

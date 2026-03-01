@@ -215,11 +215,12 @@ final class PlayerViewModel: ObservableObject {
     }
 
     func importFolder(from folderURL: URL) {
-        let normalizedFolder = normalizedURL(folderURL)
-        let didStartScope = bookmarksStore.beginAccess(to: normalizedFolder)
+        let folderAccessURL = folderURL
+        let didStartScope = bookmarksStore.beginAccess(to: folderAccessURL)
+        let folderBookmarkData = didStartScope ? (try? bookmarksStore.makeBookmark(for: folderAccessURL)) : nil
         let existingURLs = trackURLSet
         let stream = TrackImportWorker.folderAudioFilesStream(
-            rootURL: normalizedFolder,
+            rootURL: folderAccessURL,
             allowedExtensions: Self.allowedExtensions,
             excluding: existingURLs
         )
@@ -229,7 +230,7 @@ final class PlayerViewModel: ObservableObject {
         importTask = Task { [generation, bookmarksStore] in
             defer {
                 if didStartScope {
-                    bookmarksStore.endAccess(to: normalizedFolder)
+                    bookmarksStore.endAccess(to: folderAccessURL)
                 }
             }
 
@@ -258,6 +259,8 @@ final class PlayerViewModel: ObservableObject {
 
                 let importedBatch = await TrackImportWorker.makeTracks(
                     from: pendingURLs,
+                    scopeRootURL: folderAccessURL,
+                    scopeBookmarkData: folderBookmarkData,
                     bookmarksStore: bookmarksStore
                 )
                 pendingURLs.removeAll(keepingCapacity: true)
@@ -285,6 +288,8 @@ final class PlayerViewModel: ObservableObject {
             if !pendingURLs.isEmpty, !Task.isCancelled {
                 let importedBatch = await TrackImportWorker.makeTracks(
                     from: pendingURLs,
+                    scopeRootURL: folderAccessURL,
+                    scopeBookmarkData: folderBookmarkData,
                     bookmarksStore: bookmarksStore
                 )
                 for track in importedBatch {
@@ -414,7 +419,7 @@ final class PlayerViewModel: ObservableObject {
         tracks.remove(at: removingIndex)
         rebuildTrackIndexCache()
         playbackPositions.removeValue(forKey: id)
-        bookmarksStore.endAccess(to: removedTrack.url)
+        bookmarksStore.endAccess(to: bookmarkAccessURL(for: removedTrack))
         #if canImport(MediaPlayer)
         nowPlayingArtworkCache.removeValue(forKey: id)
         #endif
@@ -663,10 +668,11 @@ final class PlayerViewModel: ObservableObject {
         }
 
         var track = incomingTrack
+        let bookmarkAccessURL = bookmarkAccessURL(for: track)
+        let didStartAccess = bookmarksStore.beginAccess(to: bookmarkAccessURL)
         if track.bookmarkData == nil {
-            track.bookmarkData = try? bookmarksStore.makeBookmark(for: track.url)
+            track.bookmarkData = try? bookmarksStore.makeBookmark(for: bookmarkAccessURL)
         }
-        _ = bookmarksStore.beginAccess(to: track.url)
 
         tracks.append(track)
         trackIndexByID[track.id] = tracks.count - 1
@@ -695,8 +701,21 @@ final class PlayerViewModel: ObservableObject {
 
         tracks = restoredSession.tracks
         rebuildTrackIndexCache()
-        for track in tracks {
-            _ = bookmarksStore.beginAccess(to: track.url)
+        var didRegenerateBookmarks = false
+        for index in tracks.indices {
+            let bookmarkAccessURL = bookmarkAccessURL(for: tracks[index])
+            let didStartAccess = bookmarksStore.beginAccess(to: bookmarkAccessURL)
+            guard didStartAccess else { continue }
+
+            if tracks[index].bookmarkData == nil,
+               let bookmarkData = try? bookmarksStore.makeBookmark(for: bookmarkAccessURL) {
+                tracks[index].bookmarkData = bookmarkData
+                didRegenerateBookmarks = true
+            }
+        }
+
+        if didRegenerateBookmarks {
+            scheduleQueueSave()
         }
         #if canImport(MediaPlayer)
         nowPlayingArtworkCache.removeAll(keepingCapacity: true)
@@ -787,10 +806,10 @@ final class PlayerViewModel: ObservableObject {
 
         for candidate in urls {
             let normalized = normalizedURL(candidate)
-            let fileExtension = normalized.pathExtension.lowercased()
+            let fileExtension = candidate.pathExtension.lowercased()
 
-            guard normalized.isFileURL,
-                  !normalized.hasDirectoryPath,
+            guard candidate.isFileURL,
+                  !candidate.hasDirectoryPath,
                   Self.allowedExtensions.contains(fileExtension),
                   !existingURLs.contains(normalized),
                   !uniqueURLs.contains(normalized) else {
@@ -798,7 +817,7 @@ final class PlayerViewModel: ObservableObject {
             }
 
             uniqueURLs.insert(normalized)
-            accepted.append(normalized)
+            accepted.append(candidate)
         }
 
         return accepted
@@ -806,6 +825,13 @@ final class PlayerViewModel: ObservableObject {
 
     private func normalizedURL(_ url: URL) -> URL {
         url.standardizedFileURL.resolvingSymlinksInPath()
+    }
+
+    private func bookmarkAccessURL(for track: Track) -> URL {
+        if let bookmarkRootPath = track.bookmarkRootPath {
+            return URL(fileURLWithPath: bookmarkRootPath)
+        }
+        return track.url
     }
 
     private func trackIndex(for id: Track.ID) -> Int? {
@@ -868,6 +894,8 @@ final class PlayerViewModel: ObservableObject {
             hasher.combine(track.isPlayable)
             hasher.combine(track.unplayableReason ?? "")
             hasher.combine(track.bookmarkData?.count ?? -1)
+            hasher.combine(track.bookmarkRootPath ?? "")
+            hasher.combine(track.relativePathFromBookmarkRoot ?? "")
             hasher.combine(track.artworkData?.count ?? -1)
         }
         return hasher.finalize()
@@ -1103,14 +1131,52 @@ private enum TrackImportWorker {
         }
     }
 
+    nonisolated static func makeTracks(
+        from urls: [URL],
+        scopeRootURL: URL,
+        scopeBookmarkData: Data?,
+        bookmarksStore _: BookmarksStore
+    ) async -> [Track] {
+        guard !urls.isEmpty else { return [] }
+
+        let normalizedScopeRootURL = scopeRootURL.standardizedFileURL
+        let scopeRootPath = normalizedScopeRootURL.path
+
+        return await withTaskGroup(of: (Int, Track).self, returning: [Track].self) { group in
+            for (index, url) in urls.enumerated() {
+                group.addTask(priority: .userInitiated) {
+                    let relativePath = relativePath(from: normalizedScopeRootURL, to: url)
+                    let track = await makeTrack(
+                        from: url,
+                        bookmarkData: scopeBookmarkData,
+                        bookmarkRootPath: scopeRootPath,
+                        relativePathFromBookmarkRoot: relativePath
+                    )
+                    return (index, track)
+                }
+            }
+
+            var orderedTracks: [Track?] = Array(repeating: nil, count: urls.count)
+            for await (index, track) in group {
+                orderedTracks[index] = track
+            }
+            return orderedTracks.compactMap { $0 }
+        }
+    }
+
     nonisolated static func makeTrack(from url: URL) async -> Track {
         await makeTrack(from: url, bookmarkData: nil)
     }
 
-    nonisolated static func makeTrack(from url: URL, bookmarkData: Data?) async -> Track {
-        let normalized = url.standardizedFileURL.resolvingSymlinksInPath()
-        let fallbackTitle = normalized.deletingPathExtension().lastPathComponent
-        let asset = AVURLAsset(url: normalized)
+    nonisolated static func makeTrack(
+        from url: URL,
+        bookmarkData: Data?,
+        bookmarkRootPath: String? = nil,
+        relativePathFromBookmarkRoot: String? = nil
+    ) async -> Track {
+        let trackURL = url
+        let fallbackTitle = trackURL.deletingPathExtension().lastPathComponent
+        let asset = AVURLAsset(url: trackURL)
 
         do {
             async let durationTask = asset.load(.duration)
@@ -1135,25 +1201,29 @@ private enum TrackImportWorker {
             let artworkData = await artworkTask
 
             return Track(
-                url: normalized,
+                url: trackURL,
                 title: title,
                 artist: artist,
                 album: album,
                 duration: resolvedDuration,
                 artworkData: artworkData,
                 bookmarkData: bookmarkData,
+                bookmarkRootPath: bookmarkRootPath,
+                relativePathFromBookmarkRoot: relativePathFromBookmarkRoot,
                 isPlayable: isPlayable,
                 unplayableReason: isPlayable ? nil : "Unsupported codec or format"
             )
         } catch {
             return Track(
-                url: normalized,
+                url: trackURL,
                 title: fallbackTitle,
                 artist: nil,
                 album: nil,
                 duration: nil,
                 artworkData: nil,
                 bookmarkData: bookmarkData,
+                bookmarkRootPath: bookmarkRootPath,
+                relativePathFromBookmarkRoot: relativePathFromBookmarkRoot,
                 isPlayable: false,
                 unplayableReason: "Metadata read failed"
             )
@@ -1166,7 +1236,7 @@ private enum TrackImportWorker {
         excluding existing: Set<URL>
     ) -> AsyncStream<URL> {
         func normalize(_ url: URL) -> URL {
-            url.standardizedFileURL.resolvingSymlinksInPath()
+            url.standardizedFileURL
         }
 
         let normalizedRoot = normalize(rootURL)
@@ -1249,14 +1319,27 @@ private enum TrackImportWorker {
     }
 
     private nonisolated static func makeBookmark(for url: URL, bookmarksStore: BookmarksStore) -> Data? {
-        let normalized = url.standardizedFileURL.resolvingSymlinksInPath()
-        let didStartScope = bookmarksStore.beginAccess(to: normalized)
+        let didStartScope = bookmarksStore.beginAccess(to: url)
         defer {
             if didStartScope {
-                bookmarksStore.endAccess(to: normalized)
+                bookmarksStore.endAccess(to: url)
             }
         }
 
-        return try? bookmarksStore.makeBookmark(for: normalized)
+        return try? bookmarksStore.makeBookmark(for: url)
+    }
+
+    private nonisolated static func relativePath(from rootURL: URL, to fileURL: URL) -> String? {
+        let normalizedRoot = rootURL.standardizedFileURL
+        let normalizedFile = fileURL.standardizedFileURL
+        let rootComponents = normalizedRoot.pathComponents
+        let fileComponents = normalizedFile.pathComponents
+
+        guard fileComponents.count > rootComponents.count,
+              Array(fileComponents.prefix(rootComponents.count)) == rootComponents else {
+            return nil
+        }
+
+        return fileComponents.dropFirst(rootComponents.count).joined(separator: "/")
     }
 }

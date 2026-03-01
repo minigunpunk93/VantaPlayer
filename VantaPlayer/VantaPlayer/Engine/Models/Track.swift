@@ -9,6 +9,8 @@ nonisolated struct Track: Identifiable, Hashable, Sendable {
     var duration: TimeInterval?
     var artworkData: Data?
     var bookmarkData: Data?
+    var bookmarkRootPath: String?
+    var relativePathFromBookmarkRoot: String?
     var isPlayable: Bool
     var unplayableReason: String?
 
@@ -21,6 +23,8 @@ nonisolated struct Track: Identifiable, Hashable, Sendable {
         duration: TimeInterval? = nil,
         artworkData: Data? = nil,
         bookmarkData: Data? = nil,
+        bookmarkRootPath: String? = nil,
+        relativePathFromBookmarkRoot: String? = nil,
         isPlayable: Bool = true,
         unplayableReason: String? = nil
     ) {
@@ -32,6 +36,8 @@ nonisolated struct Track: Identifiable, Hashable, Sendable {
         self.duration = duration
         self.artworkData = artworkData
         self.bookmarkData = bookmarkData
+        self.bookmarkRootPath = bookmarkRootPath
+        self.relativePathFromBookmarkRoot = relativePathFromBookmarkRoot
         self.isPlayable = isPlayable
         self.unplayableReason = unplayableReason
     }
