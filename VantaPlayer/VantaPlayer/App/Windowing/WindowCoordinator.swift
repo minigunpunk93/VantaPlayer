@@ -42,6 +42,10 @@ final class WindowCoordinator: NSObject, ObservableObject {
     private var isInspectorVisible = WindowCoordinator.storedBool(AppStorageKeys.isInspectorVisible, default: true)
     private var normalHeightPreset: NormalHeightPreset = .full
     private var isApplyingWindowMode = false
+    private var baseNormalContentHeight: CGFloat?
+    private var inspectorContentHeightDelta: CGFloat {
+        max(0, fullNormalContentSize.height - normalNoInspectorContentHeight)
+    }
 
     func attach(window: NSWindow) {
         guard self.window !== window else { return }
@@ -59,11 +63,17 @@ final class WindowCoordinator: NSObject, ObservableObject {
             playlistVisible: isPlaylistVisible,
             inspectorVisible: isInspectorVisible
         )
+        captureBaseNormalContentHeight(from: window, inspectorVisible: isInspectorVisible)
         applyCurrentWindowMode(setContentSize: true, animateResize: false)
     }
 
     func setCompactModeEnabled(_ enabled: Bool) {
         guard isCompactModeEnabled != enabled else { return }
+        if enabled,
+           let window,
+           !window.styleMask.contains(.fullScreen) {
+            captureBaseNormalContentHeight(from: window, inspectorVisible: isInspectorVisible)
+        }
         isCompactModeEnabled = enabled
         applyCurrentWindowMode(setContentSize: true, animateResize: false)
     }
@@ -71,7 +81,8 @@ final class WindowCoordinator: NSObject, ObservableObject {
     func setSectionVisibility(playlistVisible: Bool, inspectorVisible: Bool) {
         // Playlist is always visible in normal mode.
         let resolvedPlaylistVisible = true
-        let didChange = isPlaylistVisible != resolvedPlaylistVisible || isInspectorVisible != inspectorVisible
+        let previousInspectorVisible = isInspectorVisible
+        let didChange = isPlaylistVisible != resolvedPlaylistVisible || previousInspectorVisible != inspectorVisible
 
         _ = playlistVisible
         isPlaylistVisible = resolvedPlaylistVisible
@@ -80,6 +91,8 @@ final class WindowCoordinator: NSObject, ObservableObject {
         guard didChange else { return }
         guard !isCompactModeEnabled else { return }
         guard let window, !window.styleMask.contains(.fullScreen) else { return }
+
+        captureBaseNormalContentHeight(from: window, inspectorVisible: previousInspectorVisible)
 
         normalHeightPreset = resolvedNormalHeightPreset(
             playlistVisible: resolvedPlaylistVisible,
@@ -133,10 +146,10 @@ final class WindowCoordinator: NSObject, ObservableObject {
     }
 
     private func applyNormalMode(on window: NSWindow, setContentSize: Bool, animateResize: Bool) {
-        let targetFrameSize = normalTargetFrameSize(for: window)
+        let targetFrameSize = resolvedNormalFrameSize(for: window)
         let minimumFrameHeight = resolvedNormalMinimumFrameHeight(
             for: window,
-            targetFrameSize: targetFrameSize
+            inspectorVisible: isInspectorVisible
         )
 
         if setContentSize {
@@ -199,15 +212,42 @@ final class WindowCoordinator: NSObject, ObservableObject {
         targetFrameSize(for: window, contentSize: normalContentSize(for: normalHeightPreset))
     }
 
-    private func normalMinimumFrameSize(for window: NSWindow) -> NSSize {
-        targetFrameSize(for: window, contentSize: normalMinContentSize)
+    private func resolvedNormalFrameSize(for window: NSWindow) -> NSSize {
+        let baseHeight = resolvedBaseNormalContentHeight()
+        let targetContentHeight = baseHeight + (isInspectorVisible ? inspectorContentHeightDelta : 0)
+        let targetFrame = targetFrameSize(
+            for: window,
+            contentSize: NSSize(width: fullNormalContentSize.width, height: targetContentHeight)
+        )
+        return NSSize(width: normalTargetFrameSize(for: window).width, height: targetFrame.height)
     }
 
-    private func resolvedNormalMinimumFrameHeight(for window: NSWindow, targetFrameSize: NSSize? = nil) -> CGFloat {
-        if isInspectorVisible {
-            return (targetFrameSize ?? normalTargetFrameSize(for: window)).height
+    private func resolvedBaseNormalContentHeight() -> CGFloat {
+        let fallbackHeight = max(normalNoInspectorContentHeight, normalMinContentSize.height)
+        guard let baseNormalContentHeight else {
+            return fallbackHeight
         }
-        return normalMinimumFrameSize(for: window).height
+        return max(baseNormalContentHeight, normalMinContentSize.height)
+    }
+
+    private func captureBaseNormalContentHeight(from window: NSWindow, inspectorVisible: Bool) {
+        let currentContentRect = window.contentRect(forFrameRect: window.frame)
+        guard currentContentRect.height.isFinite, currentContentRect.height > 0 else {
+            return
+        }
+
+        let normalizedBaseHeight = currentContentRect.height - (inspectorVisible ? inspectorContentHeightDelta : 0)
+        baseNormalContentHeight = max(normalizedBaseHeight, normalMinContentSize.height)
+    }
+
+    private func resolvedNormalMinimumFrameHeight(for window: NSWindow, inspectorVisible: Bool) -> CGFloat {
+        let minBaseHeight = normalMinContentSize.height
+        let minContentHeight = minBaseHeight + (inspectorVisible ? inspectorContentHeightDelta : 0)
+        let minFrameSize = targetFrameSize(
+            for: window,
+            contentSize: NSSize(width: fullNormalContentSize.width, height: minContentHeight)
+        )
+        return minFrameSize.height
     }
 
     private func compactTargetFrameSize(for window: NSWindow) -> NSSize {
@@ -373,7 +413,7 @@ extension WindowCoordinator: NSWindowDelegate {
             let fixedWidth = targetFrameSize.width
             let minimumHeight = self.resolvedNormalMinimumFrameHeight(
                 for: sender,
-                targetFrameSize: targetFrameSize
+                inspectorVisible: self.isInspectorVisible
             )
             let clampedHeight = max(frameSize.height, minimumHeight)
             return NSSize(width: fixedWidth, height: clampedHeight)
@@ -416,6 +456,11 @@ extension WindowCoordinator: NSWindowDelegate {
         MainActor.assumeIsolated { [weak self] in
             guard let self, let window = self.window else { return }
             self.refreshChromeInsets(for: window)
+            if !self.isApplyingWindowMode,
+               !self.isCompactModeEnabled,
+               !window.styleMask.contains(.fullScreen) {
+                self.captureBaseNormalContentHeight(from: window, inspectorVisible: self.isInspectorVisible)
+            }
             self.proxiedDelegate?.windowDidResize?(notification)
         }
     }
